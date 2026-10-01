@@ -39,7 +39,7 @@ Clone the repository into the target profile's plugin directory, then enable the
 PROFILE=sdr
 PLUGIN_DIR="$HOME/.hermes/profiles/$PROFILE/plugins/pipefacil_sdr"
 mkdir -p "$(dirname "$PLUGIN_DIR")"
-git clone https://github.com/cardosolucass96/hermes-pipefacil-plugin.git "$PLUGIN_DIR"
+git clone https://github.com/MatchSales/hermes-pipefacil-plugin.git "$PLUGIN_DIR"
 hermes -p "$PROFILE" plugins enable pipefacil-platform
 ```
 
@@ -62,7 +62,7 @@ target in this Hermes version. Install explicitly into a secondary profile:
 
 ```bash
 docker exec -u hermes -it <container> hermes -p <profile> plugins install \
-  https://github.com/cardosolucass96/hermes-pipefacil-plugin.git --enable
+  https://github.com/MatchSales/hermes-pipefacil-plugin.git --enable
 docker exec -u hermes <container> hermes -p <profile> plugins list --user --plain
 ```
 

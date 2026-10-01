@@ -41,7 +41,7 @@ Clone o repositório no diretório de plugins do profile e habilite o plugin:
 PROFILE=sdr
 PLUGIN_DIR="$HOME/.hermes/profiles/$PROFILE/plugins/pipefacil_sdr"
 mkdir -p "$(dirname "$PLUGIN_DIR")"
-git clone https://github.com/cardosolucass96/hermes-pipefacil-plugin.git "$PLUGIN_DIR"
+git clone https://github.com/MatchSales/hermes-pipefacil-plugin.git "$PLUGIN_DIR"
 hermes -p "$PROFILE" plugins enable pipefacil-platform
 ```
 
@@ -64,7 +64,7 @@ instalação nessa versão do Hermes. Para um profile secundário, instale nele 
 
 ```bash
 docker exec -u hermes -it <container> hermes -p <profile> plugins install \
-  https://github.com/cardosolucass96/hermes-pipefacil-plugin.git --enable
+  https://github.com/MatchSales/hermes-pipefacil-plugin.git --enable
 docker exec -u hermes <container> hermes -p <profile> plugins list --user --plain
 ```
 
