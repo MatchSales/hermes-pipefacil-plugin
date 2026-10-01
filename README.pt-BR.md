@@ -55,6 +55,40 @@ PIPEFACIL_WEBHOOK_SECRET=...
 
 Reinicie o gateway após alterar arquivos do plugin, credenciais ou configuração do profile.
 
+### Instalação em Docker e pelo painel
+
+Na imagem oficial, os dados persistentes ficam em `/opt/data`. Confirme o nome exato do profile com
+`hermes profile list` dentro do contêiner. O instalador da tela **Plugins** instala no profile que
+hospeda o processo do painel; selecionar outro profile no topo da página não muda o destino da
+instalação nessa versão do Hermes. Para um profile secundário, instale nele explicitamente:
+
+```bash
+docker exec -u hermes -it <container> hermes -p <profile> plugins install \
+  https://github.com/cardosolucass96/hermes-pipefacil-plugin.git --enable
+docker exec -u hermes <container> hermes -p <profile> plugins list --user --plain
+```
+
+Use `-u hermes` porque `docker exec` sem essa opção entra como root na imagem oficial e pode criar
+arquivos que o gateway não consegue alterar. O comando usa Git e não exige `gh`. Quando o instalador avisa que faltam
+`PIPEFACIL_API_KEY` e `PIPEFACIL_WEBHOOK_SECRET`, o plugin pode já estar instalado e habilitado:
+cadastre as chaves no profile atendido, em **Canais > Pipefacil > Configure** ou no `.env` desse
+profile. O cartão Pipefacil aparece quando o plugin é carregado no profile; as chaves são
+necessárias para conectá-lo.
+
+Em Docker com gateway compartilhado, inicie ou reinicie o gateway do profile `default`, que atende
+os profiles secundários:
+
+```bash
+docker exec -u hermes <container> hermes -p default gateway status
+docker exec -u hermes <container> hermes -p default gateway start   # se estiver parado
+docker exec -u hermes <container> hermes -p default gateway restart # se já estiver ativo
+```
+
+Se o painel mostrar `no such gateway '<profile>'`, confirme primeiro que o profile existe com
+`hermes profile list` e que o gateway `default` está ativo. Não recrie um profile existente. O
+serviço s6 em `/run/service/gateway-<profile>` é temporário; a inicialização do contêiner o
+reconstrói a partir dos profiles persistentes.
+
 ## Configuração do profile
 
 Habilite a plataforma e somente as ferramentas restritas do Pipefacil:
@@ -64,8 +98,8 @@ platforms:
   pipefacil:
     enabled: true
     extra:
-      host: 127.0.0.1
-      port: 8645
+      host: 127.0.0.1 # usado quando este profile executa um gateway independente
+      port: 8645      # no gateway compartilhado, vale a porta do listener default
       path: /events/message-received
       history_limit: 100 # de 1 a 200
       allowed_users:
@@ -123,8 +157,11 @@ https://<seu-host-publico>/p/<profile>/events/message-received
 ```
 
 A rota de profile compartilhada exige que o listener HTTP do gateway `default` esteja habilitado e
-acessível pelo host público. O health check local acrescenta `/health` ao callback, por exemplo
-`http://127.0.0.1:8645/events/message-received/health`.
+acessível pelo host público. Consulte `hermes -p default gateway status` para obter o endereço e a
+porta efetivos: em uma imagem Docker limpa testada, o callback compartilhado usou a porta `8642`,
+embora `platforms.pipefacil.extra.port` fosse `8645`. O health check acrescenta `/health` ao callback,
+por exemplo `http://127.0.0.1:8642/p/<profile>/events/message-received/health`. A porta `8645`
+vale para um gateway Pipefacil independente.
 
 O Pipefacil envia a assinatura no header `X-Pipefacil-Signature-256` e o timestamp em
 `X-Pipefacil-Timestamp`. O Hermes valida HMAC-SHA256 sobre `<timestamp>.<JSON body>` e rejeita
