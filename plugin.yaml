@@ -1,11 +1,15 @@
 name: pipefacil-platform
 label: Pipefacil
 kind: platform
-version: 0.1.0
-description: Receives signed Pipefacil webhooks, loads conversation history, replies to leads through the API, and updates deals.
+version: 0.2.0
+description: Receives signed Pipefacil webhooks with current media, replies with text or allowlisted media, and updates deals.
 author: Hermes Pipefacil plugin contributors
 provides_tools:
   - pipefacil_update_deal
+  - pipefacil_read_profile_file
+  - pipefacil_send_messages
+provides_hooks:
+  - on_session_finalize
 requires_env:
   - name: PIPEFACIL_API_KEY
     description: Pipefacil public API key for this Hermes profile

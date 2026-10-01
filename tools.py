@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import mimetypes
+from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from gateway.platforms._shared import get_scoped_secret
 
@@ -13,6 +16,7 @@ from .api import (
     normalize_api_base_url,
     update_deal,
 )
+from .media import resolve_media_link
 
 _DEAL_FIELDS = {
     "name",
@@ -43,15 +47,21 @@ def _pipefacil_available() -> bool:
     return bool(get_scoped_secret("PIPEFACIL_API_KEY", "").strip())
 
 
-async def _update_deal(args: dict[str, Any], **kwargs: Any) -> str:
+async def _update_deal(args: dict[str, Any], *, session_id: str = "", **kwargs: Any) -> str:
     from tools.registry import tool_error, tool_result
+    from hermes_constants import get_hermes_home
 
-    try:
-        seq = int(args.get("seq"))
-    except (TypeError, ValueError):
-        return tool_error("Provide the deal seq from the trusted Pipefacil event context.")
-    if seq <= 0:
-        return tool_error("The deal seq must be a positive integer.")
+    profile_home = Path(get_hermes_home()).resolve()
+    chat_id, routing_error = _active_pipefacil_chat(session_id, profile_home)
+    if routing_error:
+        return tool_error(routing_error)
+    from .adapter import adapter_for_profile
+
+    adapter = adapter_for_profile(profile_home, chat_id)
+    context = adapter.trusted_turn_context(chat_id) if adapter is not None else None
+    seq = context.get("deal_seq") if context is not None else None
+    if not isinstance(seq, int) or seq <= 0:
+        return tool_error("The current authenticated Pipefacil event has no deal to update.")
     properties = args.get("properties")
     if not isinstance(properties, dict) or not properties:
         return tool_error("Provide at least one CRM field to update in properties.")
@@ -74,14 +84,181 @@ async def _update_deal(args: dict[str, Any], **kwargs: Any) -> str:
     return tool_result({"success": True, "seq": seq, "updated_fields": sorted(properties)})
 
 
+def _read_profile_file(
+    args: dict[str, Any], *, session_id: str = "", task_id: str = "default", **kwargs: Any,
+) -> str:
+    """Read approved profile knowledge or an attachment from this active lead turn."""
+    from hermes_constants import get_hermes_home
+    from tools.registry import tool_error
+
+    profile_home = Path(get_hermes_home()).resolve()
+    chat_id, routing_error = _active_pipefacil_chat(session_id, profile_home)
+    if routing_error:
+        return tool_error(routing_error)
+    from .adapter import adapter_for_profile
+
+    adapter = adapter_for_profile(profile_home, chat_id)
+    context = adapter.trusted_turn_context(chat_id) if adapter is not None else None
+    if context is None:
+        return tool_error("There is no active authenticated Pipefacil turn to read files for.")
+    raw_path = args.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip() or "\x00" in raw_path:
+        return tool_error("Provide a file path from the current attachment or the profile knowledge folder.")
+    candidate = Path(raw_path.strip()).expanduser()
+    if not candidate.is_absolute():
+        candidate = profile_home / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+        knowledge_root = profile_home / "knowledge"
+        approved = (
+            resolved.is_relative_to(knowledge_root)
+            or str(resolved) in context["media_paths"]
+        )
+        if not approved or not resolved.is_file() or resolved.stat().st_size > 25 * 1024 * 1024:
+            return tool_error("Reading this file is not allowed for the current Pipefacil conversation.")
+    except (OSError, RuntimeError, ValueError):
+        return tool_error("The requested file is unavailable or outside this profile.")
+    try:
+        offset = int(args.get("offset", 1))
+        limit = int(args.get("limit", 200))
+    except (TypeError, ValueError):
+        return tool_error("offset and limit must be integers.")
+    if offset < 1 or not 1 <= limit <= 200:
+        return tool_error("Use offset >= 1 and limit between 1 and 200.")
+    from tools.file_tools import read_file_tool
+
+    return read_file_tool(str(resolved), offset=offset, limit=limit, task_id=task_id)
+
+
+def _active_pipefacil_chat(session_id: str, profile_home: Path) -> tuple[str | None, str]:
+    """Resolve the current conversation from Hermes-owned state, never model arguments."""
+    if not session_id:
+        return None, "This tool requires an active Pipefacil conversation."
+    try:
+        from hermes_state import SessionDB
+
+        state = SessionDB(db_path=profile_home / "state.db", read_only=True)
+    except Exception:
+        return None, "Hermes session routing is unavailable; no message was sent."
+    try:
+        entry = state.gateway_routing_entry_for_session(session_id)
+    except Exception:
+        entry = None
+    finally:
+        state.close()
+    origin = entry.get("origin") if isinstance(entry, dict) else None
+    if not isinstance(origin, dict) or origin.get("platform") != "pipefacil":
+        return None, "The active Hermes session is not a Pipefacil conversation."
+    chat_id = origin.get("chat_id")
+    if not isinstance(chat_id, str) or not chat_id:
+        return None, "The active Pipefacil conversation has no trusted destination."
+    return chat_id, ""
+
+
+def _prepare_outbound_message(item: Any, profile_home: Path) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        raise ValueError("Each message must be an object.")
+    kind = item.get("type")
+    caption = item.get("caption")
+    if caption is not None and (not isinstance(caption, str) or len(caption) > 1000):
+        raise ValueError("A caption must be text of at most 1000 characters.")
+    if kind == "text":
+        text = item.get("text")
+        if not isinstance(text, str) or not text.strip() or len(text) > 4000:
+            raise ValueError("Text messages must contain 1–4000 characters.")
+        if caption is not None or item.get("url") is not None:
+            raise ValueError("Text messages accept only the text field.")
+        return {"type": "text", "text": text}
+    if kind not in {"image", "document"}:
+        raise ValueError("Message type must be text, image, or document.")
+    url = item.get("url")
+    if not isinstance(url, str):
+        raise ValueError("An image or document requires a URL listed in this profile's SOUL.md.")
+    library_item = resolve_media_link(profile_home, kind=kind, url=url)
+    if library_item is None:
+        raise ValueError("That HTTPS URL and type are not listed in this profile's SOUL.md.")
+    parsed = urlsplit(library_item.url)
+    filename = unquote(parsed.path.rsplit("/", 1)[-1]).strip()
+    mime_type = mimetypes.guess_type(filename or parsed.path)[0]
+    message: dict[str, Any] = {"type": kind, "mediaLink": library_item.url}
+    if caption:
+        message["caption"] = caption
+    if kind == "document":
+        filename = filename or library_item.label
+        filename = filename.replace("\\", "_").replace("/", "_").replace("\r", " ").replace("\n", " ")[:180]
+        message["filename"] = filename
+    if mime_type:
+        message["mimeType"] = mime_type
+    return message
+
+
+async def _send_messages(
+    args: dict[str, Any], *, session_id: str = "", **kwargs: Any,
+) -> str:
+    from tools.registry import tool_error, tool_result
+
+    items = args.get("messages")
+    if not isinstance(items, list) or not 1 <= len(items) <= 2:
+        return tool_error("Provide one or two messages; the agent's final response is sent automatically afterward.")
+    try:
+        from hermes_constants import get_hermes_home
+
+        profile_home = Path(get_hermes_home()).resolve()
+        prepared = [_prepare_outbound_message(item, profile_home) for item in items]
+    except (OSError, TypeError, ValueError) as exc:
+        return tool_error(f"No message was sent: {exc}")
+
+    chat_id, routing_error = _active_pipefacil_chat(session_id, profile_home)
+    if routing_error:
+        return tool_error(routing_error)
+    from .adapter import adapter_for_profile, reserve_preliminary_messages
+
+    adapter = adapter_for_profile(profile_home, chat_id)
+    if adapter is None:
+        return tool_error("No active Pipefacil destination exists for this Hermes session; no message was sent.")
+    try:
+        # Hermes currently injects session_id/task_id into plugin tool handlers but not turn_id.
+        # The tool-dispatch observability context is per-turn and is bound for every registry call.
+        from tools import approval_context
+
+        turn_id = approval_context._approval_turn_id.get()
+    except (AttributeError, ImportError):
+        turn_id = ""
+    if not reserve_preliminary_messages(profile_home, turn_id, len(prepared)):
+        return tool_error(
+            "This Hermes turn can send at most two preliminary messages in total. "
+            "The final assistant response is sent automatically afterward."
+        )
+
+    accepted = []
+    for index, message in enumerate(prepared, start=1):
+        try:
+            result = await adapter.send_api_message(chat_id, message)
+        except PipefacilAPIError as exc:
+            if accepted:
+                return tool_error(
+                    f"Partial result: Pipefacil accepted {len(accepted)} of {len(prepared)} requested messages; "
+                    f"message {index} failed ({exc}). Do not claim the failed message was sent."
+                )
+            return tool_error(f"Pipefacil did not accept message {index}: {exc}")
+        accepted.append({"index": index, "status": "accepted_by_api", "message_id": result.get("message_id")})
+    return tool_result({
+        "success": True,
+        "accepted_by_api": len(accepted),
+        "delivery_confirmed": False,
+        "messages": accepted,
+        "note": "The final assistant response is sent automatically after this tool call.",
+    })
+
+
 def register_tools(ctx) -> None:
     name = "pipefacil_update_deal"
     ctx.register_tool(
         name=name,
         toolset="pipefacil",
         description=(
-            "Update fields of the lead/deal from the authenticated Pipefacil webhook. Use only the seq "
-            "provided in the trusted event context, and only when the conversation gives reliable evidence "
+            "Update fields of the deal in the CURRENT authenticated Pipefacil event. The deal seq is "
+            "resolved by the plugin, never supplied by the model. Only update when the conversation gives reliable evidence "
             "for the change. For a stage move pass its exact stageId; a lost stage also requires lostReason. "
             "Never use this to mark a deal won or lost based only on a promise or an inference."
         ),
@@ -91,7 +268,6 @@ def register_tools(ctx) -> None:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "seq": {"type": "integer", "minimum": 1},
                     "properties": {
                         "type": "object",
                         "description": "Fields to patch; workspaceId is deliberately not accepted.",
@@ -119,7 +295,7 @@ def register_tools(ctx) -> None:
                         "additionalProperties": False,
                     },
                 },
-                "required": ["seq", "properties"],
+                "required": ["properties"],
                 "additionalProperties": False,
             },
         },
@@ -127,4 +303,78 @@ def register_tools(ctx) -> None:
         check_fn=_pipefacil_available,
         is_async=True,
         emoji="🗂️",
+    )
+
+    read_name = "pipefacil_read_profile_file"
+    ctx.register_tool(
+        name=read_name,
+        toolset="pipefacil",
+        description=(
+            "Read a file from this profile's operator-approved knowledge folder or an attachment "
+            "received in the current authenticated lead turn. No files from other profiles, "
+            "credentials, transcripts, configuration, or plugin code are available. Read-only."
+        ),
+        schema={
+            "name": read_name,
+            "description": "Read an approved profile file or current lead attachment.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "offset": {"type": "integer", "minimum": 1},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+        handler=_read_profile_file,
+        check_fn=_pipefacil_available,
+        emoji="📄",
+    )
+
+    send_name = "pipefacil_send_messages"
+    ctx.register_tool(
+        name=send_name,
+        toolset="pipefacil",
+        description=(
+            "Send one or two messages to the lead in the CURRENT authenticated Pipefacil conversation, "
+            "then Hermes sends your final answer automatically. Use this to split a reply or send an "
+            "approved image/document before the final text. For media, use only an exact HTTPS URL "
+            "listed in this profile's SOUL.md under the Pipefacil media library. This tool has no "
+            "recipient/phone parameter. You can send at most two preliminary messages total per turn, "
+            "even if the tool is called more than once. A successful result means the API accepted the request, not "
+            "that WhatsApp delivery was confirmed."
+        ),
+        schema={
+            "name": send_name,
+            "description": "Send up to two text or allowlisted media messages to the active Pipefacil lead.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "messages": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 2,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["text", "image", "document"]},
+                                "text": {"type": "string", "maxLength": 4000},
+                                "url": {"type": "string", "maxLength": 4000},
+                                "caption": {"type": "string", "maxLength": 1000},
+                            },
+                            "required": ["type"],
+                            "additionalProperties": False,
+                        },
+                    }
+                },
+                "required": ["messages"],
+                "additionalProperties": False,
+            },
+        },
+        handler=_send_messages,
+        check_fn=_pipefacil_available,
+        is_async=True,
+        emoji="📨",
     )

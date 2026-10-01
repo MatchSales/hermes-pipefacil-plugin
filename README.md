@@ -11,10 +11,15 @@ sends the final answer through the Pipefacil API, and provides a narrowly scoped
 - Verifies Pipefacil webhook signatures with HMAC-SHA256 and a five-minute replay window.
 - Loads recent conversation messages from every participant, not only messages sent by Hermes.
 - Replies to the lead through the Pipefacil API.
+- Registers `pipefacil_send_messages` to send up to two additional text, image, or document messages before Hermes sends its final answer automatically.
+- Downloads attachments only from current signed webhook messages and passes them to Hermes' native image/document handling.
 - Falls back to the local Hermes conversation context if Pipefacil history cannot be loaded.
+- Treats a standalone `/reset` message as a Hermes command, removes the finished local session transcript,
+  and stops sending pre-reset Pipefacil history back to the model for that conversation.
 - Registers `pipefacil_update_deal` for updating an explicitly identified deal.
 - Reads API credentials from the owning Hermes profile; it does not accept a `workspaceId`.
-- Handles text messages. Attachments are marked in context but are not downloaded or transcribed.
+- Historical attachments are shown as non-text content and are not downloaded.
+- Outbound media links must be HTTPS and explicitly listed in the active profile's `SOUL.md`.
 
 ## Requirements
 
@@ -50,7 +55,7 @@ Restart the gateway after changing plugin files, credentials, or profile configu
 
 ## Configure the profile
 
-Enable the platform and expose only its CRM tool to this profile:
+Enable only the restricted Pipefacil tools for this profile:
 
 ```yaml
 platforms:
@@ -63,19 +68,41 @@ platforms:
       history_limit: 100 # from 1 to 200
       allowed_users:
         - "*"
+      reset_allowed_users: [] # authorized test numbers with country and area code
       # Optional for a homologation or local Pipefacil server:
       # api_base_url: https://homolog.pipefacil.matchsales.com.br
 
 platform_toolsets:
   pipefacil: [pipefacil]
+
+agent:
+  max_turns: 50
 ```
 
 The wildcard allowlist permits lead identities from signed Pipefacil webhooks to reach the agent. The
 plugin verifies the webhook signature before dispatching an event. Keep the webhook signing secret
 private and do not expose the listener directly over plain HTTP.
 
-The `pipefacil` toolset contains only `pipefacil_update_deal`. The agent can update a deal only when
-the webhook provides its `seq`; supported fields are validated before the Pipefacil API request.
+The `pipefacil` toolset contains response tools, an update tool bound to the authenticated event's deal,
+and `pipefacil_read_profile_file`. The send tool uses the
+destination from the authenticated event; the model cannot choose a phone number. It accepts one or two
+messages, and Hermes sends its final answer automatically afterward. A successful result confirms that
+the API accepted the request, not that WhatsApp delivery was confirmed. Reads are limited to current
+turn attachments and files under this profile's `knowledge/` folder. Do not enable Hermes' `file`
+toolset for a public-facing agent; it also exposes writing and patching tools.
+
+### Profile media library
+
+List each HTTPS media URL the agent may share in that profile's `SOUL.md`, with a label and type (`image`
+or `document`):
+
+```text
+- label: Company overview | type: document | url: https://bucket.example.com/overview.pdf?signature=...
+- label: Team photo | type: image | url: https://bucket.example.com/team.jpg?signature=...
+```
+
+The plugin accepts only an exact type and URL match from the active profile's `SOUL.md`. Signed links
+must remain valid and accessible to WhatsApp when sent; an expired link is reported as an API failure.
 
 ## Configure the webhook
 
@@ -111,6 +138,11 @@ that conversation and to ask a short clarifying question if context is missing. 
 not contain messages exchanged outside Hermes, and its availability depends on the host's session
 restoration support. The API key is still required for outbound replies and CRM updates.
 
+An authorized number in `reset_allowed_users` can send `/reset` by itself to start from a clean context. Hermes opens a new session, the plugin removes
+the previous local transcript, and future turns ignore Pipefacil history from before the reset message.
+The original CRM messages remain in Pipefacil; this command clears the agent's context without deleting
+the customer conversation.
+
 ## Compatibility note
 
 When Hermes exposes the `notify_missing_home_channel` platform capability, this plugin disables the
@@ -118,13 +150,22 @@ personal `/sethome` onboarding notice for Pipefacil leads. Older Hermes hosts do
 option; the plugin remains loadable, but the host may show its usual home-channel notice on a new
 conversation.
 
+## Inbound media
+
+Only attachments in the current webhook messages are downloaded. Downloads require HTTPS, do not follow
+redirects, and are limited to 25 MiB per file. Images enter Hermes' native vision path; supported
+documents are available through `pipefacil_read_profile_file`. Expired links, unsupported types, empty
+responses, and invalid files are surfaced in the model context; the agent must not claim to have read or
+analyzed an unavailable attachment. Historical attachments are not downloaded. Scanned PDFs without a
+text layer may not extract.
+
 ## Security and privacy
 
 - Keep `PIPEFACIL_API_KEY` and `PIPEFACIL_WEBHOOK_SECRET` in the profile's secret file, outside Git.
 - Use HTTPS between Pipefacil and the public ingress.
 - Lead messages and recent conversation history are sent to the configured Hermes model as turn
   context. Treat the model provider and profile access policy as part of your data-handling setup.
-- The plugin does not download media or transcribe attachments in this release.
+- The plugin does not download historical attachments or transcribe audio.
 - See [SECURITY.md](SECURITY.md) for responsible vulnerability reporting.
 
 ## License

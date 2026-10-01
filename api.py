@@ -125,7 +125,49 @@ def send_text_message(
     channel_id: str | None = None,
     sender_phone_number_id: str | None = None,
 ) -> dict[str, Any]:
-    body: dict[str, Any] = {"to": recipient, "type": "text", "text": text}
+    return send_message(
+        api_key=api_key,
+        base_url=base_url,
+        recipient=recipient,
+        message_type="text",
+        text=text,
+        channel_id=channel_id,
+        sender_phone_number_id=sender_phone_number_id,
+    )
+
+
+def send_message(
+    *,
+    api_key: str,
+    base_url: str,
+    recipient: str,
+    message_type: str,
+    text: str | None = None,
+    media_link: str | None = None,
+    caption: str | None = None,
+    filename: str | None = None,
+    mime_type: str | None = None,
+    channel_id: str | None = None,
+    sender_phone_number_id: str | None = None,
+) -> dict[str, Any]:
+    """Send a public API text, image, or document message to one trusted destination."""
+    if message_type not in {"text", "image", "document"}:
+        raise PipefacilAPIError("Unsupported Pipefacil message type.")
+    body: dict[str, Any] = {"to": recipient, "type": message_type}
+    if message_type == "text":
+        if not isinstance(text, str) or not text.strip():
+            raise PipefacilAPIError("Refusing to send an empty Pipefacil text message.")
+        body["text"] = text
+    else:
+        if not isinstance(media_link, str) or not media_link.startswith("https://"):
+            raise PipefacilAPIError("Pipefacil media messages require an HTTPS mediaLink.")
+        body["mediaLink"] = media_link
+        if caption:
+            body["caption"] = caption
+        if filename:
+            body["filename"] = filename
+        if mime_type:
+            body["mimeType"] = mime_type
     if channel_id:
         body["channelId"] = channel_id
     elif sender_phone_number_id:
