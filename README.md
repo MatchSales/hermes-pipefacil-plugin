@@ -60,6 +60,27 @@ In the official image, persistent data lives under `/opt/data`. Confirm the exac
 the dashboard process; selecting another profile in the page header does not change the install
 target in this Hermes version. Install explicitly into a secondary profile:
 
+**If you only have the dashboard's Hermes Console:** select the customer-facing profile in the
+page header, open **System > Open console**, and confirm the profile name shown in the console
+header. Enter one command at a time, without `hermes`, `-p`, or shell commands:
+
+```text
+profile
+profile list
+plugins list --user --plain
+```
+
+If the plugin is absent, run
+`plugins install https://github.com/MatchSales/hermes-pipefacil-plugin.git --enable`
+(the repository must be accessible to this Hermes). If it is disabled, run
+`plugins enable pipefacil-platform`. The Console asks for confirmation before changes. Then set
+both credentials under **Channels > Pipefacil > Configure** in the same profile. To control the
+gateway, select the `default` profile in the dashboard header and use **System > Gateway > Start** if stopped, or
+**Restart** if already running. Hermes Console does not expose the `gateway` command or the
+`/run/service` filesystem.
+
+**If you have a shell on the Docker host**, the equivalent is:
+
 ```bash
 docker exec -u hermes -it <container> hermes -p <profile> plugins install \
   https://github.com/MatchSales/hermes-pipefacil-plugin.git --enable

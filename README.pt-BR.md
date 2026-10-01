@@ -62,6 +62,27 @@ Na imagem oficial, os dados persistentes ficam em `/opt/data`. Confirme o nome e
 hospeda o processo do painel; selecionar outro profile no topo da página não muda o destino da
 instalação nessa versão do Hermes. Para um profile secundário, instale nele explicitamente:
 
+**Se você só tem acesso ao Hermes Console do painel:** selecione o profile de atendimento no topo
+da página, abra **System > Open console** e confirme o nome do profile exibido no cabeçalho.
+Digite um comando por vez, sem `hermes`, `-p` ou comandos de shell:
+
+```text
+profile
+profile list
+plugins list --user --plain
+```
+
+Se o plugin estiver ausente, instale com
+`plugins install https://github.com/MatchSales/hermes-pipefacil-plugin.git --enable`
+(o repositório precisa estar acessível a esse Hermes). Se aparecer desabilitado, use
+`plugins enable pipefacil-platform`. O Console pede confirmação para alterações. Depois cadastre
+as chaves em **Canais > Pipefacil > Configure** no mesmo profile. Para ligar o gateway, selecione
+o profile `default` no topo do painel e use **System > Gateway > Start** se estiver parado, ou
+**Restart** se estiver ativo. O Hermes Console não oferece o comando `gateway` nem acesso a
+`/run/service`.
+
+**Se você tem acesso ao terminal do host Docker**, o equivalente é:
+
 ```bash
 docker exec -u hermes -it <container> hermes -p <profile> plugins install \
   https://github.com/MatchSales/hermes-pipefacil-plugin.git --enable
