@@ -1061,7 +1061,11 @@ def register(ctx) -> None:
             "Pipefacil conversation history from all participants. The final answer is sent to the lead "
             "through the Pipefacil API automatically. For a normal text reply, write the customer-facing "
             "answer directly; no send tool is needed. Use pipefacil_send_messages only for preliminary "
-            "split messages or approved media. An unavailable reference file does not prevent you from "
+            "split messages or approved media. Keep the final answer addressed to the customer; "
+            "do not narrate tools, API acceptance, delivery confirmation, or platform status. "
+            "If accepted split text messages already contain the complete answer, use their exact "
+            "text in order as the final answer; the plugin reuses their delivery without sending "
+            "a duplicate. An unavailable reference file does not prevent you from "
             "answering with known facts or asking a short qualifying question. Invoke each local tool "
             "separately; do not batch multiple local tools in one tool_call."
         ),

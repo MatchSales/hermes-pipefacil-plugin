@@ -292,7 +292,13 @@ async def _send_messages(
         "accepted_by_api": len(accepted),
         "delivery_confirmed": False,
         "messages": accepted,
-        "note": "The final assistant response is sent automatically. Do not repeat text already accepted by this tool.",
+        "note": (
+            "Keep your final response addressed to the lead. Do not narrate API acceptance, "
+            "delivery confirmation, tools, or platform status. If these accepted text messages "
+            "already contain the complete answer, use their exact text in order as your final "
+            "response: the plugin reuses their delivery and does not send them again. "
+            "Otherwise write only additional customer-facing content."
+        ),
     })
 
 
@@ -391,11 +397,18 @@ def register_tools(ctx) -> None:
             "listed in this profile's SOUL.md under the Pipefacil media library. This tool has no "
             "recipient/phone parameter. You can send at most two preliminary messages total per turn, "
             "even if the tool is called more than once. A successful result means the API accepted the request, not "
-            "that WhatsApp delivery was confirmed."
+            "that WhatsApp delivery was confirmed. Do not narrate API or delivery status to the lead. "
+            "If the accepted text messages are the complete answer, use their exact text in order "
+            "as your final response; the plugin prevents duplicate delivery."
         ),
         schema={
             "name": send_name,
-            "description": "Send preliminary split messages or approved media to the active lead. Hermes sends the final answer automatically; ordinary text replies need only a final answer.",
+            "description": (
+                "Send split messages or approved media to the active lead. Ordinary text replies need "
+                "only a final answer. Keep the final answer customer-facing, without API or delivery "
+                "status. If these texts are the complete answer, use their exact text in order as "
+                "the final answer; the plugin prevents duplicate delivery."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {

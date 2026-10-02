@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.4
+
+- Keep final answers addressed to the lead after split sends, without narrating API or delivery status. Reuse the accepted texts as the final answer when they already answer the customer completely.
+
 ## 0.3.3
 
 - Avoid an automatic final reply repeating exactly the text already API-accepted through `pipefacil_send_messages` in that same live turn. New final content and subsequent turns still send normally.

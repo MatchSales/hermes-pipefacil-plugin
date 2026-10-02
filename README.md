@@ -147,6 +147,8 @@ For ordinary text replies, the agent should write its final answer directly; Her
 automatically. Use `pipefacil_send_messages` only for preliminary split messages or approved media.
 If the model repeats those exact accepted texts in its automatic final answer, the plugin reuses their
 delivery result instead of sending a duplicate. This check is limited to that same live turn.
+When split texts already contain the complete answer, the final answer should use those exact texts
+in order. It should not narrate internal API acceptance or delivery-confirmation status to the lead.
 To discover approved reference files, call `pipefacil_read_profile_file` with `path: knowledge/`,
 then read an exact listed path. Wildcards and listing the profile root are not supported.
 
