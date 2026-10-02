@@ -187,7 +187,12 @@ def _active_pipefacil_chat(session_id: str, profile_home: Path) -> tuple[str | N
     chat_id = getattr(origin, "chat_id", None)
     if not isinstance(chat_id, str) or not chat_id:
         return None, "The active Pipefacil conversation has no trusted destination."
-    if adapter_for_profile(profile_home, chat_id) is not adapter or adapter.trusted_turn_context(chat_id) is None:
+    context = adapter.trusted_turn_context(chat_id)
+    if (
+        adapter_for_profile(profile_home, chat_id) is not adapter
+        or context is None
+        or context.get("session_key") != entry.session_key
+    ):
         return None, "There is no active Pipefacil webhook turn for this conversation; no action was taken."
     return chat_id, ""
 
@@ -387,7 +392,7 @@ def register_tools(ctx) -> None:
         ),
         schema={
             "name": send_name,
-            "description": "Send up to two text or allowlisted media messages to the active Pipefacil lead.",
+            "description": "Send preliminary split messages or approved media to the active lead. Hermes sends the final answer automatically; ordinary text replies need only a final answer.",
             "parameters": {
                 "type": "object",
                 "properties": {

@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 from datetime import datetime
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -53,6 +54,7 @@ MAX_CURRENT_WEBHOOK_ATTACHMENTS = 5
 _ADAPTERS_LOCK = threading.RLock()
 _PRELIMINARY_SENDS_LOCK = threading.Lock()
 _ADAPTERS_BY_PROFILE: dict[str, "PipefacilAdapter"] = {}
+_ACTIVE_PIPEFACIL_TURN: ContextVar[Any] = ContextVar("active_pipefacil_turn", default=None)
 _PRELIMINARY_SEND_COUNTS: dict[tuple[str, str], tuple[int, float]] = {}
 
 
@@ -683,30 +685,51 @@ class PipefacilAdapter(BasePlatformAdapter):
             allow_gateway_control=False,
             reply_expected=True,
         )
-        turn_context = {
+        event._pipefacil_turn_context = {
             "deal_seq": trusted_seq,
             "media_paths": frozenset(str(Path(path).resolve()) for path in media_urls),
         }
-        with self._turn_context_lock:
-            self._active_turn_context.setdefault(chat_id, []).append(turn_context)
         try:
             await self.handle_message(event)
         except Exception:
             self._release_message_claims(messages)
             raise
-        finally:
-            with self._turn_context_lock:
-                contexts = self._active_turn_context.get(chat_id, [])
-                if turn_context in contexts:
-                    contexts.remove(turn_context)
-                if not contexts:
-                    self._active_turn_context.pop(chat_id, None)
+
+    async def on_processing_start(self, event: MessageEvent) -> None:
+        """Bind facts when Hermes actually starts the background model turn."""
+        context = getattr(event, "_pipefacil_turn_context", None)
+        if not isinstance(context, dict):
+            return
+        chat_id = str(event.source.chat_id)
+        context["session_key"] = self._event_session_key(event)
+        with self._turn_context_lock:
+            self._active_turn_context.setdefault(chat_id, []).append(context)
+        event._pipefacil_context_token = _ACTIVE_PIPEFACIL_TURN.set((self, chat_id, context))
+
+    async def on_processing_complete(self, event: MessageEvent, outcome: Any) -> None:
+        """Revoke the exact event on completion, failure, or cancellation."""
+        context = getattr(event, "_pipefacil_turn_context", None)
+        chat_id = str(event.source.chat_id)
+        with self._turn_context_lock:
+            remaining = [item for item in self._active_turn_context.get(chat_id, []) if item is not context]
+            if remaining:
+                self._active_turn_context[chat_id] = remaining
+            else:
+                self._active_turn_context.pop(chat_id, None)
+        token = getattr(event, "_pipefacil_context_token", None)
+        if token is not None:
+            _ACTIVE_PIPEFACIL_TURN.reset(token)
+            event._pipefacil_context_token = None
 
     def trusted_turn_context(self, chat_id: str) -> dict[str, Any] | None:
-        """Current webhook facts for the active conversation only."""
+        """Facts bound to this worker's exact live event, never a queued follow-up."""
+        active = _ACTIVE_PIPEFACIL_TURN.get()
+        if active is None or active[0] is not self or active[1] != str(chat_id):
+            return None
+        context = active[2]
         with self._turn_context_lock:
             contexts = self._active_turn_context.get(str(chat_id), [])
-            return contexts[-1].copy() if contexts else None
+            return context.copy() if any(item is context for item in contexts) else None
 
     def _release_message_claims(self, messages: list[dict[str, Any]]) -> None:
         for message in messages:
@@ -1007,7 +1030,8 @@ def register(ctx) -> None:
             "through the Pipefacil API automatically. For a normal text reply, write the customer-facing "
             "answer directly; no send tool is needed. Use pipefacil_send_messages only for preliminary "
             "split messages or approved media. An unavailable reference file does not prevent you from "
-            "answering with known facts or asking a short qualifying question."
+            "answering with known facts or asking a short qualifying question. Invoke each local tool "
+            "separately; do not batch multiple local tools in one tool_call."
         ),
         **_optional_registration_fields(notify_missing_home_channel=False),
     )

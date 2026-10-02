@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.2
+
+- Keep trusted webhook facts alive for Hermes' actual background-processing lifecycle, instead of the short admission call.
+- Bind each tool worker to its exact live event; queued messages cannot replace its deal or attachment context. Revoke access on completion, error, and cancellation.
+- Clarify separate local tool invocations and automatic final-message delivery.
+
 ## 0.3.1
 
 - Resolve active tool sessions through the gateway's live routing store, including secondary profiles in a shared gateway; reject stale, cross-profile, and non-Pipefacil sessions.

@@ -204,9 +204,11 @@ the customer conversation. Observability records and other profiles' sessions ar
 
 ## Compatibility note
 
-Version 0.3.1 is tested with Hermes 0.21.5 (`749220ef`), including two secondary profiles in a shared
+Version 0.3.2 is tested with Hermes 0.21.5 (`749220ef`), including two secondary profiles in a shared
 gateway. Tool routing uses the gateway's live session index; each profile keeps its own transcripts.
 The plugin supports both the legacy and guarded session-deletion signatures.
+Trusted tool facts follow the actual background-processing callbacks. Each worker retains its own
+event context, and access is revoked when processing completes, fails, or is cancelled.
 
 Pipefacil defaults to `notice_delivery: private` and suppresses private gateway setup notices, so
 public leads do not receive `/sethome` instructions even on older hosts. On hosts that expose

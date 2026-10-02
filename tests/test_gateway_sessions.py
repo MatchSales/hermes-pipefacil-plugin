@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import importlib.util
 import json
 import sys
@@ -46,7 +47,7 @@ def multiplex(tmp_path, monkeypatch):
     store = SessionStore(root / "sessions", GatewayConfig(multiplex_profiles=True))
     adapter_module, tools = _modules()
     monkeypatch.setattr(adapter_module, "_ADAPTERS_BY_PROFILE", {})
-    entries, adapters = {}, {}
+    entries, adapters, contexts = {}, {}, {}
     chat_id = "channel:test-contact"
     try:
         for name, home in homes.items():
@@ -62,14 +63,23 @@ def multiplex(tmp_path, monkeypatch):
             adapter.gateway_runner = SimpleNamespace(session_store=store)
             adapter._destinations = {chat_id: {"phone": "test-contact"}}
             adapter._turn_context_lock = threading.RLock()
-            adapter._active_turn_context = {chat_id: [{"deal_seq": 106, "media_paths": frozenset()}]}
+            contexts[name] = {"deal_seq": 106, "media_paths": frozenset(), "session_key": entries[name].session_key}
+            adapter._active_turn_context = {chat_id: [contexts[name]]}
             adapter._history_reset_lock = threading.RLock()
             adapter._pending_reset_purges = {}
             adapter._reset_purge_results = {}
             adapter_module._ADAPTERS_BY_PROFILE[str(home.resolve())] = adapter
             adapters[name] = adapter
+        @contextmanager
+        def turn(name):
+            token = adapter_module._ACTIVE_PIPEFACIL_TURN.set((adapters[name], chat_id, contexts[name]))
+            try:
+                yield
+            finally:
+                adapter_module._ACTIVE_PIPEFACIL_TURN.reset(token)
+
         yield SimpleNamespace(root=root, homes=homes, entries=entries, adapters=adapters,
-                              store=store, tools=tools, module=adapter_module, chat_id=chat_id)
+                              store=store, tools=tools, module=adapter_module, chat_id=chat_id, turn=turn)
     finally:
         store.close_all_db_handles()
         reset_hermes_home_override(token)
@@ -82,7 +92,8 @@ def test_live_route_is_resolved_when_routing_index_lives_in_gateway_home(multipl
         # This topology reproduced the production bug: only the root has gateway_routing.
         assert m.store._db_for_key(entry.session_key).gateway_routing_entry_for_session(entry.session_id) is None
         assert m.store._routing_db.gateway_routing_entry_for_session(entry.session_id) is not None
-        assert m.tools._active_pipefacil_chat(entry.session_id, m.homes[name]) == (m.chat_id, "")
+        with m.turn(name):
+            assert m.tools._active_pipefacil_chat(entry.session_id, m.homes[name]) == (m.chat_id, "")
     assert m.tools._active_pipefacil_chat(m.entries["sdr-b"].session_id, m.homes["sdr-a"])[0] is None
     assert m.tools._active_pipefacil_chat("unknown-session", m.homes["sdr-a"])[0] is None
     from gateway.config import Platform
@@ -112,6 +123,8 @@ def test_all_three_tools_use_the_current_profile_route(multiplex, monkeypatch):
     monkeypatch.setattr(m.tools, "update_deal", lambda **kwargs: updates.append(kwargs))
     token = set_hermes_home_override(str(home))
     ctx = set_current_observability_context(turn_id="gateway-regression", session_id=m.entries["sdr-a"].session_id)
+    active = m.turn("sdr-a")
+    active.__enter__()
     try:
         sid = m.entries["sdr-a"].session_id
         assert "Profile A knowledge" in m.tools._read_profile_file({"path": "knowledge/guide.txt"}, session_id=sid)
@@ -125,6 +138,7 @@ def test_all_three_tools_use_the_current_profile_route(multiplex, monkeypatch):
         )))["success"] is True
         assert updates[0]["seq"] == 106
     finally:
+        active.__exit__(None, None, None)
         reset_current_observability_context(ctx)
         reset_hermes_home_override(token)
 
@@ -135,6 +149,8 @@ def test_approved_reference_listing_cannot_expose_other_profile_files(multiplex)
     home = m.homes["sdr-a"]
     sid = m.entries["sdr-a"].session_id
     token = set_hermes_home_override(str(home))
+    active = m.turn("sdr-a")
+    active.__enter__()
     try:
         assert json.loads(m.tools._read_profile_file({"path": "knowledge/"}, session_id=sid))["entries"] == []
         folder = home / "knowledge"
@@ -154,6 +170,7 @@ def test_approved_reference_listing_cannot_expose_other_profile_files(multiplex)
             assert "error" in json.loads(m.tools._read_profile_file({"path": path}, session_id=sid))
         assert "knowledge/" in m.tools._read_profile_file({"path": "*"}, session_id=sid)
     finally:
+        active.__exit__(None, None, None)
         reset_hermes_home_override(token)
 
 
@@ -203,7 +220,116 @@ def test_reset_removes_only_the_rotated_profile_transcript(multiplex, monkeypatc
     assert db.get_session(new.session_id) is not None
     assert other_db.get_session(other.session_id) is not None
     assert m.tools._active_pipefacil_chat(old.session_id, m.homes["sdr-a"])[0] is None
-    assert m.tools._active_pipefacil_chat(new.session_id, m.homes["sdr-a"]) == (m.chat_id, "")
+    with m.turn("sdr-a"):
+        assert m.tools._active_pipefacil_chat(new.session_id, m.homes["sdr-a"]) == (m.chat_id, "")
+
+
+def test_real_background_dispatch_keeps_each_event_context_until_completion(multiplex):
+    from contextvars import copy_context
+    from dataclasses import replace
+    from gateway.config import PlatformConfig
+    from gateway.platforms.event import MessageType
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    m = multiplex
+    token = set_hermes_home_override(str(m.homes["sdr-a"]))
+    adapter = m.module.PipefacilAdapter(PlatformConfig(enabled=True, extra={}))
+    adapter.gateway_runner = SimpleNamespace(session_store=m.store)
+    adapter._destinations = {m.chat_id: {"phone": "test-contact"}}
+    captured, seen = [], []
+
+    async def scenario():
+        first_started, release_first, second_done = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def handler(event):
+            if event.message_id == "first":
+                first_started.set()
+                await release_first.wait()
+            captured.append(copy_context())
+            context = await asyncio.to_thread(adapter.trusted_turn_context, m.chat_id)
+            route = await asyncio.to_thread(m.tools._active_pipefacil_chat, m.entries["sdr-a"].session_id, adapter.profile_home)
+            seen.append((event.message_id, context["deal_seq"], route))
+            if event.message_id == "second":
+                second_done.set()
+            return None
+
+        adapter.set_message_handler(handler)
+        events = []
+        for message_id, seq in (("first", 106), ("second", 206)):
+            event = m.module._new_message_event(
+                text="Customer message", message_type=MessageType.TEXT, user_id="test-contact",
+                source=replace(m.entries["sdr-a"].origin, message_id=message_id), message_id=message_id,
+                allow_gateway_control=False,
+            )
+            event._pipefacil_turn_context = {"deal_seq": seq, "media_paths": frozenset()}
+            events.append(event)
+        # Hermes returns before the model finishes. The second event is queued, not active yet.
+        await adapter.handle_message(events[0])
+        await asyncio.wait_for(first_started.wait(), 2)
+        await adapter.handle_message(events[1])
+        assert adapter.trusted_turn_context(m.chat_id) is None  # unrelated task cannot borrow facts
+        release_first.set()
+        await asyncio.wait_for(second_done.wait(), 2)
+        await asyncio.gather(*list(adapter._session_tasks.values()))
+
+    try:
+        asyncio.run(scenario())
+        assert seen == [("first", 106, (m.chat_id, "")), ("second", 206, (m.chat_id, ""))]
+        assert adapter._active_turn_context == {}
+        assert all(context.run(adapter.trusted_turn_context, m.chat_id) is None for context in captured)
+    finally:
+        reset_hermes_home_override(token)
+
+
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_background_context_is_revoked_after_failure_or_cancellation(multiplex, monkeypatch, cancelled):
+    from contextvars import copy_context
+    from dataclasses import replace
+    from gateway.config import PlatformConfig
+    from gateway.platforms.base import SendResult
+    from gateway.platforms.event import MessageType
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    m = multiplex
+    token = set_hermes_home_override(str(m.homes["sdr-a"]))
+    adapter = m.module.PipefacilAdapter(PlatformConfig(enabled=True, extra={}))
+    captured = []
+
+    async def no_delivery(*args, **kwargs):
+        return SendResult(success=True)
+
+    monkeypatch.setattr(adapter, "send", no_delivery)
+
+    async def scenario():
+        started, never = asyncio.Event(), asyncio.Event()
+
+        async def handler(event):
+            captured.append(copy_context())
+            assert adapter.trusted_turn_context(m.chat_id)["deal_seq"] == 106
+            started.set()
+            if cancelled:
+                await never.wait()
+            raise RuntimeError("Expected test failure")
+
+        adapter.set_message_handler(handler)
+        event = m.module._new_message_event(
+            text="Customer message", message_type=MessageType.TEXT, user_id="test-contact",
+            source=replace(m.entries["sdr-a"].origin, message_id="failing"), message_id="failing",
+            allow_gateway_control=False,
+        )
+        event._pipefacil_turn_context = {"deal_seq": 106, "media_paths": frozenset()}
+        await adapter.handle_message(event)
+        await asyncio.wait_for(started.wait(), 2)
+        tasks = list(adapter._session_tasks.values())
+        if cancelled:
+            for task in tasks:
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    try:
+        asyncio.run(scenario())
+        assert adapter._active_turn_context == {}
+        assert captured[0].run(adapter.trusted_turn_context, m.chat_id) is None
+    finally:
+        reset_hermes_home_override(token)
 
 
 def test_gateway_operator_notices_are_not_sent_to_leads(multiplex, monkeypatch):
