@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0
+
+- Accept Pipefacil webhooks without checking signature or timestamp; only the Pipefacil API key is required to connect. Restrict access at the ingress before exposing the callback.
+- Support Hermes versions whose `MessageEvent` does not define `reply_expected`, including Hermes 0.21.5.
+
 ## 0.2.0
 
 - Handle `/reset` in Pipefacil chats as a Hermes session reset, clearing the prior local transcript and excluding pre-reset CRM history from future model context.

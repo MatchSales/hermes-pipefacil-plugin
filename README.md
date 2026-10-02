@@ -8,11 +8,11 @@ sends the final answer through the Pipefacil API, and provides a narrowly scoped
 
 ## Features
 
-- Verifies Pipefacil webhook signatures with HMAC-SHA256 and a five-minute replay window.
+- Accepts Pipefacil `message.received` webhooks without signature or timestamp verification.
 - Loads recent conversation messages from every participant, not only messages sent by Hermes.
 - Replies to the lead through the Pipefacil API.
 - Registers `pipefacil_send_messages` to send up to two additional text, image, or document messages before Hermes sends its final answer automatically.
-- Downloads attachments only from current signed webhook messages and passes them to Hermes' native image/document handling.
+- Downloads attachments only from current webhook messages and passes them to Hermes' native image/document handling.
 - Falls back to the local Hermes conversation context if Pipefacil history cannot be loaded.
 - Treats a standalone `/reset` message as a Hermes command, removes the finished local session transcript,
   and stops sending pre-reset Pipefacil history back to the model for that conversation.
@@ -25,7 +25,6 @@ sends the final answer through the Pipefacil API, and provides a narrowly scoped
 
 - A Hermes installation with gateway plugins and the plugin platform registry.
 - A Pipefacil API key with `API_ACCESS`, `ADVANCED_API`, conversation read/send access, and deal edit access.
-- The webhook signing secret configured for the Pipefacil callback.
 - A public HTTPS endpoint or tunnel that forwards the callback to the Hermes gateway.
 
 Conversation history and outbound replies require Pipefacil's `ADVANCED_API` feature. See the
@@ -48,7 +47,6 @@ in that profile's `.env`; never commit them:
 
 ```dotenv
 PIPEFACIL_API_KEY=pf_live_...
-PIPEFACIL_WEBHOOK_SECRET=...
 ```
 
 Restart the gateway after changing plugin files, credentials, or profile configuration.
@@ -74,7 +72,7 @@ If the plugin is absent, run
 `plugins install https://github.com/MatchSales/hermes-pipefacil-plugin.git --enable`
 (the repository must be accessible to this Hermes). If it is disabled, run
 `plugins enable pipefacil-platform`. The Console asks for confirmation before changes. Then set
-both credentials under **Channels > Pipefacil > Configure** in the same profile. To control the
+the API key under **Channels > Pipefacil > Configure** in the same profile. To control the
 gateway, select the `default` profile in the dashboard header and use **System > Gateway > Start** if stopped, or
 **Restart** if already running. Hermes Console does not expose the `gateway` command or the
 `/run/service` filesystem.
@@ -88,10 +86,10 @@ docker exec -u hermes <container> hermes -p <profile> plugins list --user --plai
 ```
 
 Use `-u hermes`: `docker exec` defaults to root in the official image and can leave files that the
-gateway cannot modify. This uses Git and does not require `gh`. A warning that `PIPEFACIL_API_KEY` and
-`PIPEFACIL_WEBHOOK_SECRET` are missing does not mean installation failed. Set both values for the
-served profile in **Channels > Pipefacil > Configure** or in that profile's `.env`. The Pipefacil
-card appears when the plugin loads in that profile; the credentials are required to connect it.
+gateway cannot modify. This uses Git and does not require `gh`. A warning that `PIPEFACIL_API_KEY`
+is missing does not mean installation failed. Set it for the served profile in
+**Channels > Pipefacil > Configure** or in that profile's `.env`. The Pipefacil card appears when
+the plugin loads in that profile; the API key is required to connect it.
 
 For Docker's shared gateway, start or restart the `default` profile's gateway, which serves
 secondary profiles:
@@ -133,13 +131,13 @@ agent:
   max_turns: 50
 ```
 
-The wildcard allowlist permits lead identities from signed Pipefacil webhooks to reach the agent. The
-plugin verifies the webhook signature before dispatching an event. Keep the webhook signing secret
-private and do not expose the listener directly over plain HTTP.
+The wildcard allowlist permits any lead identity in an inbound webhook to reach the agent. This
+version does not authenticate webhook requests: anyone who can reach the callback can submit an event
+that triggers an agent response or a deal update. Restrict access at the ingress and use HTTPS.
 
-The `pipefacil` toolset contains response tools, an update tool bound to the authenticated event's deal,
+The `pipefacil` toolset contains response tools, an update tool bound to the current event's deal,
 and `pipefacil_read_profile_file`. The send tool uses the
-destination from the authenticated event; the model cannot choose a phone number. It accepts one or two
+destination from the current event; the model cannot choose a phone number. It accepts one or two
 messages, and Hermes sends its final answer automatically afterward. A successful result confirms that
 the API accepted the request, not that WhatsApp delivery was confirmed. Reads are limited to current
 turn attachments and files under this profile's `knowledge/` folder. Do not enable Hermes' `file`
@@ -179,10 +177,9 @@ in a clean Docker image tested, the shared callback used port `8642` even though
 for example `http://127.0.0.1:8642/p/<profile>/events/message-received/health`. Port `8645`
 applies to a standalone Pipefacil gateway.
 
-Pipefacil sends the signature in `X-Pipefacil-Signature-256` and the timestamp in
-`X-Pipefacil-Timestamp`. Hermes validates HMAC-SHA256 over `<timestamp>.<JSON body>`. Timestamps
-outside the five-minute window are rejected. The endpoint acknowledges webhook admission; the model
-turn and outbound API reply run in the background.
+Hermes accepts `message.received` events without checking `X-Pipefacil-Signature-256` or
+`X-Pipefacil-Timestamp`. The endpoint acknowledges webhook admission; the model turn and outbound
+API reply run in the background. A `200` response does not confirm the agent replied successfully.
 
 ## Conversation context
 
@@ -218,7 +215,9 @@ text layer may not extract.
 
 ## Security and privacy
 
-- Keep `PIPEFACIL_API_KEY` and `PIPEFACIL_WEBHOOK_SECRET` in the profile's secret file, outside Git.
+- Keep `PIPEFACIL_API_KEY` in the profile's secret file, outside Git.
+- Protect the public callback at the ingress. This version cannot tell a Pipefacil request from a
+  forged one, and the event can cause outbound messages or CRM updates.
 - Use HTTPS between Pipefacil and the public ingress.
 - Lead messages and recent conversation history are sent to the configured Hermes model as turn
   context. Treat the model provider and profile access policy as part of your data-handling setup.

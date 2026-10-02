@@ -11,7 +11,10 @@ in reports.
 
 ## Credential handling
 
-The plugin reads `PIPEFACIL_API_KEY` and `PIPEFACIL_WEBHOOK_SECRET` from the active Hermes profile.
-Keep both values out of source control and rotate them if they are exposed. The public webhook must
-be reachable over HTTPS; the local listener should remain bound to loopback unless your deployment
+The plugin reads `PIPEFACIL_API_KEY` from the active Hermes profile. Keep it out of source control
+and rotate it if it is exposed. Version 0.3.0 does not verify inbound webhook signatures or
+timestamps. Anyone who can reach the callback can submit events that trigger agent responses,
+deal updates, or `/reset` when impersonating an allowed test number. Restrict callback access at
+the ingress before using this version on a public host.
+Use HTTPS for the public webhook; keep the local listener bound to loopback unless your deployment
 requires another network topology.

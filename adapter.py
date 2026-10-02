@@ -6,8 +6,8 @@ import asyncio
 import contextlib
 import gzip
 import hashlib
-import hmac
 import io
+import inspect
 import json
 import logging
 import math
@@ -47,14 +47,19 @@ DEFAULT_PORT = 8645
 DEFAULT_PATH = "/events/message-received"
 MAX_COMPRESSED_BODY_BYTES = 1_048_576
 MAX_DECOMPRESSED_BODY_BYTES = 4_194_304
-DEFAULT_SIGNATURE_TOLERANCE_SECONDS = 300
 DEFAULT_HISTORY_LIMIT = 100
-_HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MAX_CURRENT_WEBHOOK_ATTACHMENTS = 5
 _ADAPTERS_LOCK = threading.RLock()
 _PRELIMINARY_SENDS_LOCK = threading.Lock()
 _ADAPTERS_BY_PROFILE: dict[str, "PipefacilAdapter"] = {}
 _PRELIMINARY_SEND_COUNTS: dict[tuple[str, str], tuple[int, float]] = {}
+
+
+def _new_message_event(**kwargs: Any) -> MessageEvent:
+    """Pass reply_expected only to Hermes versions that define the field."""
+    if "reply_expected" not in inspect.signature(MessageEvent).parameters:
+        kwargs.pop("reply_expected", None)
+    return MessageEvent(**kwargs)
 
 
 def _timestamp_from_message(value: Any) -> datetime:
@@ -139,26 +144,6 @@ def _decode_body(raw_body: bytes, content_encoding: str) -> bytes:
     return decoded
 
 
-def _valid_pipefacil_signature(
-    *, secret: str, timestamp: str, signature: str, body: bytes, tolerance_seconds: int,
-) -> bool:
-    stamp = timestamp.strip()
-    provided = signature.strip()
-    if provided.startswith("sha256="):
-        provided = provided[len("sha256="):]
-    if not stamp.isdigit() or not _HEX_SHA256.fullmatch(provided):
-        return False
-    # Pipefacil sends epoch milliseconds. A narrow replay window also bounds captured requests.
-    try:
-        age_ms = abs(time.time_ns() // 1_000_000 - int(stamp))
-    except ValueError:
-        return False
-    if age_ms > max(1, tolerance_seconds) * 1000:
-        return False
-    expected = hmac.new(secret.encode("utf-8"), stamp.encode("utf-8") + b"." + body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(provided, expected)
-
-
 def _safe_path(value: Any) -> str:
     path = str(value or DEFAULT_PATH).strip()
     parsed = urlsplit(path)
@@ -176,21 +161,17 @@ def _safe_path(value: Any) -> str:
 
 
 class PipefacilAdapter(BasePlatformAdapter):
-    """HTTP inbound adapter; its API key and signature secret are read in the owning profile scope."""
+    """HTTP inbound adapter; its API key is read in the owning profile scope."""
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform("pipefacil"))
         extra = config.extra or {}
         self.api_key = get_scoped_secret("PIPEFACIL_API_KEY", "") or ""
-        self.webhook_secret = get_scoped_secret("PIPEFACIL_WEBHOOK_SECRET", "") or ""
         self.api_base_url = normalize_api_base_url(extra.get("api_base_url", DEFAULT_API_BASE_URL))
         self.host = extra.get("host", "127.0.0.1") or "127.0.0.1"
         self.port = int(extra.get("port", DEFAULT_PORT))
         self.webhook_path = _safe_path(extra.get("path", DEFAULT_PATH))
         self.history_limit = max(1, min(int(extra.get("history_limit", DEFAULT_HISTORY_LIMIT)), 200))
-        self.signature_tolerance_seconds = max(
-            1, int(extra.get("signature_tolerance_seconds", DEFAULT_SIGNATURE_TOLERANCE_SECONDS))
-        )
         reset_users = extra.get("reset_allowed_users")
         self.reset_allowed_users = {
             re.sub(r"\D", "", str(value))
@@ -216,8 +197,8 @@ class PipefacilAdapter(BasePlatformAdapter):
         self._active_turn_context: dict[str, list[dict[str, Any]]] = {}
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
-        if not self.api_key.strip() or not self.webhook_secret.strip():
-            return self._fail("config_missing", "Set PIPEFACIL_API_KEY and PIPEFACIL_WEBHOOK_SECRET in this profile's .env")
+        if not self.api_key.strip():
+            return self._fail("config_missing", "Set PIPEFACIL_API_KEY in this profile's .env")
         if not (1 <= self.port <= 65535):
             return self._fail("config_invalid", "Pipefacil webhook port must be between 1 and 65535")
         key_fingerprint = hashlib.sha256(self.api_key.encode()).hexdigest()[:16]
@@ -285,7 +266,7 @@ class PipefacilAdapter(BasePlatformAdapter):
         self._release_platform_lock()
 
     async def send_api_message(self, chat_id: str, message: dict[str, Any]) -> dict[str, Any]:
-        """Send a text/image/document to a destination admitted by a signed webhook."""
+        """Send a text/image/document to a destination from the current webhook."""
         destination = self._destinations.get(str(chat_id))
         if not destination:
             raise PipefacilAPIError("No active Pipefacil webhook destination for this conversation.")
@@ -375,16 +356,6 @@ class PipefacilAdapter(BasePlatformAdapter):
             except (ValueError, OSError):
                 return web.json_response({"error": "invalid request body"}, status=400)
 
-            timestamp = request.headers.get("X-Pipefacil-Timestamp", "")
-            signature = request.headers.get("X-Pipefacil-Signature-256", "")
-            if not _valid_pipefacil_signature(
-                secret=self.webhook_secret,
-                timestamp=timestamp,
-                signature=signature,
-                body=body,
-                tolerance_seconds=self.signature_tolerance_seconds,
-            ):
-                return web.json_response({"error": "invalid webhook signature"}, status=401)
             try:
                 payload = json.loads(body)
             except (UnicodeDecodeError, json.JSONDecodeError):
@@ -498,7 +469,7 @@ class PipefacilAdapter(BasePlatformAdapter):
                     "Não consegui preparar a limpeza desta sessão. O /reset não foi aplicado; tente novamente.",
                 )
                 return
-            event = MessageEvent(
+            event = _new_message_event(
                 text="/reset",
                 message_type=MessageType.TEXT,
                 user_id=source.user_id,
@@ -511,7 +482,7 @@ class PipefacilAdapter(BasePlatformAdapter):
                 reply_expected=True,
             )
             try:
-                # The signed, standalone /reset is the user's confirmation. Hermes asks for an
+                # The standalone /reset is the user's confirmation. Hermes asks for an
                 # additional destructive-command confirmation by default, and this platform
                 # deliberately keeps ordinary lead messages out of gateway control.
                 runner = self.gateway_runner
@@ -691,7 +662,7 @@ class PipefacilAdapter(BasePlatformAdapter):
             contact=contact,
             message_id=str(messages[-1].get("id") or messages[-1].get("externalId") or "") or None,
         )
-        event = MessageEvent(
+        event = _new_message_event(
             text=prompt,
             message_type=(
                 MessageType.PHOTO if any(mime.startswith("image/") for mime in media_types)
@@ -728,7 +699,7 @@ class PipefacilAdapter(BasePlatformAdapter):
                     self._active_turn_context.pop(chat_id, None)
 
     def trusted_turn_context(self, chat_id: str) -> dict[str, Any] | None:
-        """Current signed webhook facts for the active conversation only."""
+        """Current webhook facts for the active conversation only."""
         with self._turn_context_lock:
             contexts = self._active_turn_context.get(str(chat_id), [])
             return contexts[-1].copy() if contexts else None
@@ -919,10 +890,7 @@ def reserve_preliminary_messages(profile_home: Path, turn_id: str, count: int) -
 
 
 def _credentials_present() -> bool:
-    return bool(
-        get_scoped_secret("PIPEFACIL_API_KEY", "").strip()
-        and get_scoped_secret("PIPEFACIL_WEBHOOK_SECRET", "").strip()
-    )
+    return bool(get_scoped_secret("PIPEFACIL_API_KEY", "").strip())
 
 
 def check_requirements() -> bool:
@@ -965,7 +933,7 @@ def _on_session_finalize(
 
 
 def _env_enablement() -> dict[str, Any] | None:
-    """Enable from profile-local secrets without copying either secret into YAML."""
+    """Enable from the profile-local API key without copying it into YAML."""
     if not _credentials_present():
         return None
     return {"host": "127.0.0.1", "port": DEFAULT_PORT, "path": DEFAULT_PATH}
@@ -989,7 +957,7 @@ def register(ctx) -> None:
         check_fn=check_requirements,
         validate_config=validate_config,
         is_connected=is_connected,
-        required_env=["PIPEFACIL_API_KEY", "PIPEFACIL_WEBHOOK_SECRET"],
+        required_env=["PIPEFACIL_API_KEY"],
         allowed_users_env="PIPEFACIL_ALLOWED_USERS",
         install_hint="The Pipefacil plugin includes the webhook server and uses Hermes' aiohttp dependency.",
         env_enablement_fn=_env_enablement,

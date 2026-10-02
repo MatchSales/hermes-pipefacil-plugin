@@ -61,7 +61,7 @@ async def _update_deal(args: dict[str, Any], *, session_id: str = "", **kwargs: 
     context = adapter.trusted_turn_context(chat_id) if adapter is not None else None
     seq = context.get("deal_seq") if context is not None else None
     if not isinstance(seq, int) or seq <= 0:
-        return tool_error("The current authenticated Pipefacil event has no deal to update.")
+        return tool_error("The current Pipefacil event has no deal to update.")
     properties = args.get("properties")
     if not isinstance(properties, dict) or not properties:
         return tool_error("Provide at least one CRM field to update in properties.")
@@ -100,7 +100,7 @@ def _read_profile_file(
     adapter = adapter_for_profile(profile_home, chat_id)
     context = adapter.trusted_turn_context(chat_id) if adapter is not None else None
     if context is None:
-        return tool_error("There is no active authenticated Pipefacil turn to read files for.")
+        return tool_error("There is no active Pipefacil turn to read files for.")
     raw_path = args.get("path")
     if not isinstance(raw_path, str) or not raw_path.strip() or "\x00" in raw_path:
         return tool_error("Provide a file path from the current attachment or the profile knowledge folder.")
@@ -257,7 +257,7 @@ def register_tools(ctx) -> None:
         name=name,
         toolset="pipefacil",
         description=(
-            "Update fields of the deal in the CURRENT authenticated Pipefacil event. The deal seq is "
+            "Update fields of the deal in the CURRENT Pipefacil event. The deal seq is "
             "resolved by the plugin, never supplied by the model. Only update when the conversation gives reliable evidence "
             "for the change. For a stage move pass its exact stageId; a lost stage also requires lostReason. "
             "Never use this to mark a deal won or lost based only on a promise or an inference."
@@ -311,7 +311,7 @@ def register_tools(ctx) -> None:
         toolset="pipefacil",
         description=(
             "Read a file from this profile's operator-approved knowledge folder or an attachment "
-            "received in the current authenticated lead turn. No files from other profiles, "
+            "received in the current lead turn. No files from other profiles, "
             "credentials, transcripts, configuration, or plugin code are available. Read-only."
         ),
         schema={
@@ -338,7 +338,7 @@ def register_tools(ctx) -> None:
         name=send_name,
         toolset="pipefacil",
         description=(
-            "Send one or two messages to the lead in the CURRENT authenticated Pipefacil conversation, "
+            "Send one or two messages to the lead in the CURRENT Pipefacil conversation, "
             "then Hermes sends your final answer automatically. Use this to split a reply or send an "
             "approved image/document before the final text. For media, use only an exact HTTPS URL "
             "listed in this profile's SOUL.md under the Pipefacil media library. This tool has no "

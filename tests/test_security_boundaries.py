@@ -1,4 +1,4 @@
-"""Public Pipefacil tools must use authenticated turn facts and profile-only reads."""
+"""Public Pipefacil tools must use current turn facts and profile-only reads."""
 
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ def _tools_module(monkeypatch, profile_home: Path, *, deal_seq=42, media_paths=f
     return module
 
 
-def test_update_uses_authenticated_deal_seq_not_model_supplied_value(tmp_path, monkeypatch):
+def test_update_uses_current_deal_seq_not_model_supplied_value(tmp_path, monkeypatch):
     module = _tools_module(monkeypatch, tmp_path, deal_seq=42)
     calls = []
     monkeypatch.setattr(module, "update_deal", lambda **kwargs: calls.append(kwargs))
@@ -68,7 +68,7 @@ def test_update_uses_authenticated_deal_seq_not_model_supplied_value(tmp_path, m
     assert calls[0]["seq"] == 42
 
 
-def test_update_refuses_when_signed_event_has_no_deal(tmp_path, monkeypatch):
+def test_update_refuses_when_current_event_has_no_deal(tmp_path, monkeypatch):
     module = _tools_module(monkeypatch, tmp_path, deal_seq=None)
     assert "error" in asyncio.run(module._update_deal(
         {"properties": {"notes": "test"}}, session_id="session-1",

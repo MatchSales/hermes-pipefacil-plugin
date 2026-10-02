@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.util
+import json
 import sys
 import threading
+from dataclasses import make_dataclass
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -88,6 +90,51 @@ def _adapter_with_fake_gateway(monkeypatch):
     monkeypatch.setitem(sys.modules, package_name, package)
     spec.loader.exec_module(package)
     return __import__(f"{package_name}.adapter", fromlist=["*"])
+
+
+def test_message_event_supports_hermes_with_and_without_reply_expected(monkeypatch):
+    adapter_module = _adapter_with_fake_gateway(monkeypatch)
+    legacy_event = make_dataclass("LegacyMessageEvent", [("text", str)])
+    monkeypatch.setattr(adapter_module, "MessageEvent", legacy_event)
+    assert adapter_module._new_message_event(text="oi", reply_expected=True).text == "oi"
+
+    current_event = make_dataclass("CurrentMessageEvent", [("text", str), ("reply_expected", bool)])
+    monkeypatch.setattr(adapter_module, "MessageEvent", current_event)
+    assert adapter_module._new_message_event(text="oi", reply_expected=True).reply_expected is True
+
+
+@pytest.mark.parametrize("headers", [
+    {},
+    {"X-Pipefacil-Timestamp": "0", "X-Pipefacil-Signature-256": "sha256=invalid"},
+])
+def test_webhook_reaches_payload_validation_without_signature(monkeypatch, headers):
+    adapter_module = _adapter_with_fake_gateway(monkeypatch)
+    aiohttp = ModuleType("aiohttp")
+    aiohttp.web = SimpleNamespace(
+        json_response=lambda payload, status=200: SimpleNamespace(payload=payload, status=status),
+    )
+    monkeypatch.setitem(sys.modules, "aiohttp", aiohttp)
+    monkeypatch.setattr(
+        adapter_module, "get_scoped_secret",
+        lambda name, default="": "api-key" if name == "PIPEFACIL_API_KEY" else "",
+    )
+    assert adapter_module._credentials_present() is True
+
+    adapter = object.__new__(adapter_module.PipefacilAdapter)
+    adapter._runtime_scope = contextlib.nullcontext
+    body = json.dumps({"type": "message.received", "data": {}}).encode()
+    request_headers = headers
+
+    class Request:
+        content_length = len(body)
+        headers = request_headers
+
+        async def read(self):
+            return body
+
+    response = asyncio.run(adapter._handle_webhook(Request()))
+    assert response.status == 422
+    assert response.payload == {"error": "contact phone is required"}
 
 
 @pytest.mark.parametrize("outcome", ["ok", "gateway_error", "purge_error"])

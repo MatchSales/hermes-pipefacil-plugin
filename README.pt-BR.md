@@ -8,11 +8,11 @@ uma ferramenta restrita para atualizar o negócio no CRM.
 
 ## O que ele faz
 
-- Valida a assinatura HMAC-SHA256 do webhook e rejeita timestamps fora da janela de cinco minutos.
+- Aceita webhooks `message.received` sem validar a assinatura nem o timestamp.
 - Busca mensagens recentes de todos os participantes da conversa, não apenas as enviadas pelo Hermes.
 - Envia a resposta final do agente ao lead pela API do Pipefacil.
 - Registra `pipefacil_send_messages`, que permite enviar até duas mensagens adicionais (texto, imagem ou documento) antes da resposta final automática do Hermes.
-- Baixa somente anexos das mensagens atuais do webhook assinado e os encaminha ao processamento nativo de imagem/documento do Hermes.
+- Baixa somente anexos das mensagens atuais do webhook e os encaminha ao processamento nativo de imagem/documento do Hermes.
 - Se não conseguir carregar o histórico do Pipefacil, usa o histórico local do Hermes que estiver
   disponível para aquela conversa.
 - Trata uma mensagem isolada `/reset` como comando do Hermes, remove o transcript local da sessão
@@ -27,7 +27,6 @@ uma ferramenta restrita para atualizar o negócio no CRM.
 - Hermes com suporte a plugins de gateway e registro de plataformas.
 - Chave da API do Pipefacil com `API_ACCESS`, `ADVANCED_API`, acesso de leitura/envio de conversas e
   permissão para editar negócios.
-- Segredo de assinatura configurado para o webhook do Pipefacil.
 - URL pública HTTPS ou túnel que encaminhe o callback ao gateway Hermes.
 
 O histórico de conversas e o envio de respostas exigem o recurso `ADVANCED_API` do Pipefacil. Consulte
@@ -50,7 +49,6 @@ credenciais no arquivo `.env` do profile; não as adicione ao Git:
 
 ```dotenv
 PIPEFACIL_API_KEY=pf_live_...
-PIPEFACIL_WEBHOOK_SECRET=...
 ```
 
 Reinicie o gateway após alterar arquivos do plugin, credenciais ou configuração do profile.
@@ -76,7 +74,7 @@ Se o plugin estiver ausente, instale com
 `plugins install https://github.com/MatchSales/hermes-pipefacil-plugin.git --enable`
 (o repositório precisa estar acessível a esse Hermes). Se aparecer desabilitado, use
 `plugins enable pipefacil-platform`. O Console pede confirmação para alterações. Depois cadastre
-as chaves em **Canais > Pipefacil > Configure** no mesmo profile. Para ligar o gateway, selecione
+a chave da API em **Canais > Pipefacil > Configure** no mesmo profile. Para ligar o gateway, selecione
 o profile `default` no topo do painel e use **System > Gateway > Start** se estiver parado, ou
 **Restart** se estiver ativo. O Hermes Console não oferece o comando `gateway` nem acesso a
 `/run/service`.
@@ -90,11 +88,10 @@ docker exec -u hermes <container> hermes -p <profile> plugins list --user --plai
 ```
 
 Use `-u hermes` porque `docker exec` sem essa opção entra como root na imagem oficial e pode criar
-arquivos que o gateway não consegue alterar. O comando usa Git e não exige `gh`. Quando o instalador avisa que faltam
-`PIPEFACIL_API_KEY` e `PIPEFACIL_WEBHOOK_SECRET`, o plugin pode já estar instalado e habilitado:
-cadastre as chaves no profile atendido, em **Canais > Pipefacil > Configure** ou no `.env` desse
-profile. O cartão Pipefacil aparece quando o plugin é carregado no profile; as chaves são
-necessárias para conectá-lo.
+arquivos que o gateway não consegue alterar. O comando usa Git e não exige `gh`. Quando o instalador
+avisa que falta `PIPEFACIL_API_KEY`, o plugin pode já estar instalado e habilitado: cadastre a chave
+no profile atendido, em **Canais > Pipefacil > Configure** ou no `.env` desse profile. O cartão
+Pipefacil aparece quando o plugin é carregado no profile; a chave da API é necessária para conectá-lo.
 
 Em Docker com gateway compartilhado, inicie ou reinicie o gateway do profile `default`, que atende
 os profiles secundários:
@@ -136,13 +133,14 @@ agent:
   max_turns: 50
 ```
 
-A allowlist `*` permite que identidades de leads recebidas por webhooks assinados cheguem ao agente.
-O plugin valida a assinatura antes de encaminhar o evento. Mantenha o segredo privado e não exponha
-o listener diretamente por HTTP sem TLS.
+A allowlist `*` permite que qualquer identidade de lead recebida por webhook chegue ao agente. Esta
+versão não autentica o webhook: qualquer pessoa que alcançar o callback pode enviar um evento que
+dispare uma resposta do agente ou uma atualização no CRM. Restrinja o acesso na entrada pública e
+use HTTPS.
 
-O toolset `pipefacil` contém as ferramentas de resposta, atualização do negócio do evento autenticado e
+O toolset `pipefacil` contém as ferramentas de resposta, atualização do negócio do evento atual e
 `pipefacil_read_profile_file`. O envio de mensagens
-usa o destinatário do evento autenticado; o modelo não escolhe telefone. A ferramenta aceita de uma a
+usa o destinatário do evento atual; o modelo não escolhe telefone. A ferramenta aceita de uma a
 duas mensagens e o Hermes envia sua resposta final automaticamente depois. Um retorno de sucesso confirma
 que a API aceitou a requisição, mas não confirma a entrega pelo WhatsApp. A leitura é limitada aos
 anexos do turno atual e aos arquivos em `knowledge/` dentro do próprio profile. O toolset Hermes `file`
@@ -184,10 +182,9 @@ embora `platforms.pipefacil.extra.port` fosse `8645`. O health check acrescenta 
 por exemplo `http://127.0.0.1:8642/p/<profile>/events/message-received/health`. A porta `8645`
 vale para um gateway Pipefacil independente.
 
-O Pipefacil envia a assinatura no header `X-Pipefacil-Signature-256` e o timestamp em
-`X-Pipefacil-Timestamp`. O Hermes valida HMAC-SHA256 sobre `<timestamp>.<JSON body>` e rejeita
-timestamps fora da janela de cinco minutos. O endpoint confirma o recebimento do webhook; a geração
-da resposta e o envio pela API acontecem em segundo plano.
+O Hermes aceita eventos `message.received` sem conferir `X-Pipefacil-Signature-256` ou
+`X-Pipefacil-Timestamp`. O endpoint confirma o recebimento do webhook; a geração da resposta e o
+envio pela API acontecem em segundo plano. Um retorno `200` não confirma que o agente respondeu.
 
 ## Contexto da conversa
 
@@ -223,8 +220,9 @@ PDFs digitalizados sem camada de texto podem não ser extraídos.
 
 ## Segurança e privacidade
 
-- Mantenha `PIPEFACIL_API_KEY` e `PIPEFACIL_WEBHOOK_SECRET` no arquivo de segredos do profile, fora
-  do Git.
+- Mantenha `PIPEFACIL_API_KEY` no arquivo de segredos do profile, fora do Git.
+- Proteja o callback público na entrada: esta versão não distingue um pedido do Pipefacil de um
+  pedido forjado, que pode gerar mensagens ou atualizações no CRM.
 - Use HTTPS entre o Pipefacil e a entrada pública.
 - As mensagens do lead e o histórico recente são enviados ao modelo configurado no Hermes como
   contexto do turno. Considere o provedor do modelo e o acesso ao profile na sua política de dados.
