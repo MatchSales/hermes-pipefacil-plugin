@@ -326,6 +326,11 @@ class PipefacilAdapter(BasePlatformAdapter):
     ) -> SendResult:
         if not content.strip():
             return SendResult(success=False, error="Refusing to send an empty Pipefacil message")
+        if metadata and metadata.get("notify"):
+            reused = self._reused_final_delivery(chat_id, content)
+            if reused is not None:
+                logger.info("[pipefacil] Final text already accepted in this turn's preliminary messages; skipped duplicate")
+                return SendResult(success=True, message_id=reused.get("message_id"))
         try:
             result = await self.send_api_message(chat_id, {"type": "text", "text": content})
         except PipefacilAPIError as exc:
@@ -721,15 +726,42 @@ class PipefacilAdapter(BasePlatformAdapter):
             _ACTIVE_PIPEFACIL_TURN.reset(token)
             event._pipefacil_context_token = None
 
-    def trusted_turn_context(self, chat_id: str) -> dict[str, Any] | None:
-        """Facts bound to this worker's exact live event, never a queued follow-up."""
+    def _live_turn_context(self, chat_id: str) -> dict[str, Any] | None:
         active = _ACTIVE_PIPEFACIL_TURN.get()
         if active is None or active[0] is not self or active[1] != str(chat_id):
             return None
         context = active[2]
         with self._turn_context_lock:
             contexts = self._active_turn_context.get(str(chat_id), [])
-            return context.copy() if any(item is context for item in contexts) else None
+            return context if any(item is context for item in contexts) else None
+
+    def trusted_turn_context(self, chat_id: str) -> dict[str, Any] | None:
+        """Facts bound to this worker's exact live event, never a queued follow-up."""
+        context = self._live_turn_context(chat_id)
+        return context.copy() if context is not None else None
+
+    def record_preliminary_delivery(self, chat_id: str, message: dict[str, Any], result: dict[str, Any]) -> None:
+        context = self._live_turn_context(chat_id)
+        if context is None or message.get("type") != "text":
+            return
+        with self._turn_context_lock:
+            context.setdefault("accepted_texts", []).append({"text": message["text"], "message_id": result.get("message_id")})
+
+    def _reused_final_delivery(self, chat_id: str, content: str) -> dict[str, Any] | None:
+        """Reuse only text actually API-accepted in this exact live event."""
+        context = self._live_turn_context(chat_id)
+        if context is None:
+            return None
+        with self._turn_context_lock:
+            accepted = list(context.get("accepted_texts", []))
+        normalize = lambda text: " ".join(text.split())
+        final = normalize(content)
+        for message in accepted:
+            if final == normalize(message["text"]):
+                return message
+        if accepted and final == normalize(" ".join(message["text"] for message in accepted)):
+            return accepted[-1]
+        return None
 
     def _release_message_claims(self, messages: list[dict[str, Any]]) -> None:
         for message in messages:

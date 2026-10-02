@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3
+
+- Avoid an automatic final reply repeating exactly the text already API-accepted through `pipefacil_send_messages` in that same live turn. New final content and subsequent turns still send normally.
+
 ## 0.3.2
 
 - Keep trusted webhook facts alive for Hermes' actual background-processing lifecycle, instead of the short admission call.

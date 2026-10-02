@@ -284,12 +284,15 @@ async def _send_messages(
                 )
             return tool_error(f"Pipefacil did not accept message {index}: {exc}")
         accepted.append({"index": index, "status": "accepted_by_api", "message_id": result.get("message_id")})
+        record = getattr(adapter, "record_preliminary_delivery", None)
+        if callable(record):
+            record(chat_id, message, result)
     return tool_result({
         "success": True,
         "accepted_by_api": len(accepted),
         "delivery_confirmed": False,
         "messages": accepted,
-        "note": "The final assistant response is sent automatically after this tool call.",
+        "note": "The final assistant response is sent automatically. Do not repeat text already accepted by this tool.",
     })
 
 

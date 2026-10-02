@@ -143,6 +143,45 @@ def test_all_three_tools_use_the_current_profile_route(multiplex, monkeypatch):
         reset_hermes_home_override(token)
 
 
+@pytest.mark.parametrize("final_text,expected_id", [("First message", "accepted-1"), ("First message\n\nSecond message", "accepted-2")])
+def test_final_reply_does_not_repeat_api_accepted_text_from_the_same_turn(multiplex, monkeypatch, final_text, expected_id):
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from tools.approval_context import reset_current_observability_context, set_current_observability_context
+    m = multiplex
+    adapter = m.adapters["sdr-a"]
+    sent = []
+
+    async def send(chat_id, message):
+        sent.append(message)
+        return {"message_id": f"accepted-{len(sent)}"}
+
+    monkeypatch.setattr(adapter, "send_api_message", send)
+    home_token = set_hermes_home_override(str(m.homes["sdr-a"]))
+    obs_token = set_current_observability_context(turn_id="final-reply-dedup", session_id=m.entries["sdr-a"].session_id)
+
+    async def scenario():
+        with m.turn("sdr-a"):
+            result = json.loads(await m.tools._send_messages({"messages": [
+                {"type": "text", "text": "First message"}, {"type": "text", "text": "Second message"},
+            ]}, session_id=m.entries["sdr-a"].session_id))
+            assert result["accepted_by_api"] == 2
+            final = await adapter.send(m.chat_id, final_text, metadata={"notify": True})
+            assert final.success and final.message_id == expected_id
+            assert len(sent) == 2
+            # A useful new final answer still sends; comparison is exact except for whitespace.
+            assert (await adapter.send(m.chat_id, "A new qualifying question", metadata={"notify": True})).success
+            assert len(sent) == 3
+        # An unrelated turn cannot reuse this event's accepted texts.
+        assert (await adapter.send(m.chat_id, final_text, metadata={"notify": True})).success
+        assert len(sent) == 4
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        reset_current_observability_context(obs_token)
+        reset_hermes_home_override(home_token)
+
+
 def test_approved_reference_listing_cannot_expose_other_profile_files(multiplex):
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     m = multiplex

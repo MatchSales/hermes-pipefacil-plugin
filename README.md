@@ -145,6 +145,8 @@ toolset for a public-facing agent; it also exposes writing and patching tools.
 
 For ordinary text replies, the agent should write its final answer directly; Hermes delivers it
 automatically. Use `pipefacil_send_messages` only for preliminary split messages or approved media.
+If the model repeats those exact accepted texts in its automatic final answer, the plugin reuses their
+delivery result instead of sending a duplicate. This check is limited to that same live turn.
 To discover approved reference files, call `pipefacil_read_profile_file` with `path: knowledge/`,
 then read an exact listed path. Wildcards and listing the profile root are not supported.
 
@@ -204,7 +206,7 @@ the customer conversation. Observability records and other profiles' sessions ar
 
 ## Compatibility note
 
-Version 0.3.2 is tested with Hermes 0.21.5 (`749220ef`), including two secondary profiles in a shared
+Version 0.3.3 is tested with Hermes 0.21.5 (`749220ef`), including two secondary profiles in a shared
 gateway. Tool routing uses the gateway's live session index; each profile keeps its own transcripts.
 The plugin supports both the legacy and guarded session-deletion signatures.
 Trusted tool facts follow the actual background-processing callbacks. Each worker retains its own
