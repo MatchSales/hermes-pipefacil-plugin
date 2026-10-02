@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import mimetypes
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,8 @@ from .api import (
     update_deal,
 )
 from .media import resolve_media_link
+
+logger = logging.getLogger(__name__)
 
 _DEAL_FIELDS = {
     "name",
@@ -89,7 +92,7 @@ def _read_profile_file(
 ) -> str:
     """Read approved profile knowledge or an attachment from this active lead turn."""
     from hermes_constants import get_hermes_home
-    from tools.registry import tool_error
+    from tools.registry import tool_error, tool_result
 
     profile_home = Path(get_hermes_home()).resolve()
     chat_id, routing_error = _active_pipefacil_chat(session_id, profile_home)
@@ -104,12 +107,28 @@ def _read_profile_file(
     raw_path = args.get("path")
     if not isinstance(raw_path, str) or not raw_path.strip() or "\x00" in raw_path:
         return tool_error("Provide a file path from the current attachment or the profile knowledge folder.")
+    if any(character in raw_path for character in "*?[]"):
+        return tool_error("Use an exact file path, or path='knowledge/' to list approved reference files. Wildcards are not supported.")
     candidate = Path(raw_path.strip()).expanduser()
     if not candidate.is_absolute():
         candidate = profile_home / candidate
+    knowledge_root = profile_home / "knowledge"
+    if candidate == knowledge_root and not knowledge_root.exists():
+        return tool_result({"path": "knowledge/", "entries": [], "note": "This profile has no approved reference files yet."})
     try:
         resolved = candidate.resolve(strict=True)
-        knowledge_root = profile_home / "knowledge"
+        if resolved.is_relative_to(knowledge_root) and resolved.is_dir():
+            entries = []
+            for entry in sorted(resolved.iterdir(), key=lambda item: item.name):
+                try:
+                    target = entry.resolve(strict=True)
+                except (OSError, RuntimeError, ValueError):
+                    continue
+                if target.is_relative_to(knowledge_root) and (target.is_file() or target.is_dir()):
+                    entries.append({"path": str(entry.relative_to(profile_home)), "type": "directory" if target.is_dir() else "file"})
+                if len(entries) == 200:
+                    break
+            return tool_result({"path": str(resolved.relative_to(profile_home)), "entries": entries, "limit": 200})
         approved = (
             resolved.is_relative_to(knowledge_root)
             or str(resolved) in context["media_paths"]
@@ -131,27 +150,45 @@ def _read_profile_file(
 
 
 def _active_pipefacil_chat(session_id: str, profile_home: Path) -> tuple[str | None, str]:
-    """Resolve the current conversation from Hermes-owned state, never model arguments."""
+    """Resolve a live gateway route and verify its profile and current webhook turn.
+
+    Multiplexed Hermes stores routing in the launch profile's database, while
+    transcripts belong to each routed profile. SessionStore owns both identities.
+    """
     if not session_id:
         return None, "This tool requires an active Pipefacil conversation."
-    try:
-        from hermes_state import SessionDB
+    from .adapter import adapter_for_profile
 
-        state = SessionDB(db_path=profile_home / "state.db", read_only=True)
-    except Exception:
-        return None, "Hermes session routing is unavailable; no message was sent."
+    profile_home = Path(profile_home).resolve()
+    adapter = adapter_for_profile(profile_home)
+    runner = getattr(adapter, "gateway_runner", None)
+    store = getattr(runner, "session_store", None)
+    if store is None:
+        return None, "The active Pipefacil gateway is unavailable; no action was taken."
     try:
-        entry = state.gateway_routing_entry_for_session(session_id)
+        entry = store.lookup_by_session_id(session_id)
     except Exception:
-        entry = None
-    finally:
-        state.close()
-    origin = entry.get("origin") if isinstance(entry, dict) else None
-    if not isinstance(origin, dict) or origin.get("platform") != "pipefacil":
+        logger.warning("[pipefacil] Could not resolve the active gateway session", exc_info=True)
+        return None, "Hermes session routing is unavailable; no action was taken."
+    origin = getattr(entry, "origin", None)
+    platform = getattr(origin, "platform", None)
+    if getattr(platform, "value", platform) != "pipefacil":
         return None, "The active Hermes session is not a Pipefacil conversation."
-    chat_id = origin.get("chat_id")
+    try:
+        # Hermes selects the owner from the route key, independent of the worker's
+        # ambient context. This shared handle belongs to the gateway: never close it.
+        owner_db = store._db_for_key(entry.session_key)
+        owner_path = Path(owner_db.db_path).resolve() if owner_db is not None else None
+    except Exception:
+        logger.warning("[pipefacil] Could not verify the gateway session's profile", exc_info=True)
+        return None, "The Pipefacil session's profile could not be verified; no action was taken."
+    if owner_path != profile_home / "state.db":
+        return None, "The active Pipefacil session belongs to a different Hermes profile."
+    chat_id = getattr(origin, "chat_id", None)
     if not isinstance(chat_id, str) or not chat_id:
         return None, "The active Pipefacil conversation has no trusted destination."
+    if adapter_for_profile(profile_home, chat_id) is not adapter or adapter.trusted_turn_context(chat_id) is None:
+        return None, "There is no active Pipefacil webhook turn for this conversation; no action was taken."
     return chat_id, ""
 
 
@@ -311,16 +348,17 @@ def register_tools(ctx) -> None:
         toolset="pipefacil",
         description=(
             "Read a file from this profile's operator-approved knowledge folder or an attachment "
-            "received in the current lead turn. No files from other profiles, "
+            "received in the current lead turn. Use path='knowledge/' to list approved reference files, "
+            "then read an exact listed path; wildcards are not supported. No files from other profiles, "
             "credentials, transcripts, configuration, or plugin code are available. Read-only."
         ),
         schema={
             "name": read_name,
-            "description": "Read an approved profile file or current lead attachment.",
+            "description": "Read approved reference files or current lead attachments; list only the knowledge folder.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string"},
+                    "path": {"type": "string", "description": "Exact attachment path, knowledge/file path, or knowledge/ for a directory listing."},
                     "offset": {"type": "integer", "minimum": 1},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 200},
                 },
@@ -339,7 +377,8 @@ def register_tools(ctx) -> None:
         toolset="pipefacil",
         description=(
             "Send one or two messages to the lead in the CURRENT Pipefacil conversation, "
-            "then Hermes sends your final answer automatically. Use this to split a reply or send an "
+            "then Hermes sends your final answer automatically. For an ordinary single text reply, "
+            "write only your final answer. Use this tool to split a reply or send an "
             "approved image/document before the final text. For media, use only an exact HTTPS URL "
             "listed in this profile's SOUL.md under the Pipefacil media library. This tool has no "
             "recipient/phone parameter. You can send at most two preliminary messages total per turn, "

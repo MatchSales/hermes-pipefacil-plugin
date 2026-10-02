@@ -215,6 +215,7 @@ def test_reset_from_public_lead_is_rejected_without_rotating_session(tmp_path, m
 def test_reset_purge_reports_whether_the_old_transcript_was_deleted(tmp_path, monkeypatch, delete_fails):
     adapter_module = _adapter_with_fake_gateway(monkeypatch)
     adapter = object.__new__(adapter_module.PipefacilAdapter)
+    adapter.profile_home = tmp_path
     adapter._history_reset_lock = threading.RLock()
     adapter._pending_reset_purges = {"old-session": "pipefacil:lead"}
     adapter._reset_purge_results = {}
@@ -226,12 +227,16 @@ def test_reset_purge_reports_whether_the_old_transcript_was_deleted(tmp_path, mo
         return True
 
     store = SimpleNamespace(
-        _db_for_key=lambda key: SimpleNamespace(delete_session=delete_session),
+        _db_for_key=lambda key: SimpleNamespace(
+            delete_session=delete_session, get_session=lambda sid: {"ended_at": 1},
+            db_path=tmp_path / "state.db",
+        ),
+        lookup_by_session_id=lambda sid: None,
         remove_by_session_id=removed.append,
     )
     adapter.gateway_runner = SimpleNamespace(session_store=store)
 
-    assert adapter.purge_reset_session("old-session", sessions_dir=tmp_path) is True
+    assert adapter.purge_reset_session("old-session", sessions_dir=tmp_path / "sessions") is True
     if delete_fails:
         assert adapter._reset_purge_results == {}
         assert adapter._pending_reset_purges == {"old-session": "pipefacil:lead"}
@@ -239,4 +244,4 @@ def test_reset_purge_reports_whether_the_old_transcript_was_deleted(tmp_path, mo
     else:
         assert adapter._reset_purge_results == {"old-session": True}
         assert adapter._pending_reset_purges == {}
-        assert removed == ["old-session"]
+        assert removed == []  # The gateway already replaced the route before purge.

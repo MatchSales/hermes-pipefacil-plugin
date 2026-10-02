@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1
+
+- Resolve active tool sessions through the gateway's live routing store, including secondary profiles in a shared gateway; reject stale, cross-profile, and non-Pipefacil sessions.
+- Fix `/reset` on Hermes 0.21.5 and hosts with newer deletion signatures. Delete only the finalized predecessor's transcript and request dumps; preserve the new session, other profiles, and observability.
+- Keep gateway setup notices, including `/sethome`, out of public lead chats on older hosts.
+- Clarify automatic delivery of ordinary final replies, and allow read-only discovery of approved files with `knowledge/`.
+- Verify these paths against Hermes 0.21.5 (`749220ef`) with two multiplexed profiles.
+
 ## 0.3.0
 
 - Accept Pipefacil webhooks without checking signature or timestamp; only the Pipefacil API key is required to connect. Restrict access at the ingress before exposing the callback.

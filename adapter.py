@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import gzip
+import glob
 import hashlib
 import io
 import inspect
@@ -166,6 +167,9 @@ class PipefacilAdapter(BasePlatformAdapter):
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform("pipefacil"))
         extra = config.extra or {}
+        # Lead chats must not receive gateway setup/operator instructions.
+        extra.setdefault("notice_delivery", "private")
+        config.extra = extra
         self.api_key = get_scoped_secret("PIPEFACIL_API_KEY", "") or ""
         self.api_base_url = normalize_api_base_url(extra.get("api_base_url", DEFAULT_API_BASE_URL))
         self.host = extra.get("host", "127.0.0.1") or "127.0.0.1"
@@ -833,13 +837,39 @@ class PipefacilAdapter(BasePlatformAdapter):
             db = store._db_for_key(session_key)
             if db is None:
                 raise RuntimeError("Hermes session database is unavailable")
-            deleted = db.delete_session(
-                str(session_id),
-                sessions_dir=sessions_dir,
-                exclude_active_write_guards=True,
-            )
-            if deleted:
-                store.remove_by_session_id(str(session_id))
+            sessions_dir = Path(sessions_dir).resolve()
+            if sessions_dir != (self.profile_home / "sessions").resolve():
+                raise RuntimeError("Refusing to clear transcripts outside the owning profile")
+            if Path(db.db_path).resolve() != self.profile_home.resolve() / "state.db":
+                raise RuntimeError("The reset session database belongs to another profile")
+            # Only a completed route rotation may remove the predecessor. Older
+            # Hermes versions do not implement the optional write-guard keyword.
+            if store.lookup_by_session_id(str(session_id)) is not None:
+                raise RuntimeError("Refusing to delete a session that still owns a live gateway route")
+            row = db.get_session(str(session_id))
+            if row is not None and not row.get("ended_at"):
+                raise RuntimeError("Refusing to delete a session that Hermes has not finalized")
+            delete_kwargs = {"sessions_dir": sessions_dir}
+            parameters = inspect.signature(db.delete_session).parameters
+            if "exclude_active_write_guards" in parameters or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+            ):
+                delete_kwargs["exclude_active_write_guards"] = True
+            deleted = db.delete_session(str(session_id), **delete_kwargs)
+            if deleted or row is None:
+                # Hermes 0.21.5's file cleanup swallows filesystem errors. Check
+                # and finish the exact session artifacts before confirming reset.
+                sid = str(session_id)
+                if not sid or ".." in sid or "/" in sid or "\\" in sid:
+                    raise RuntimeError("Unsafe reset session identifier")
+                artifacts = [sessions_dir / name for name in (
+                    f"{sid}.json", f"{sid}.jsonl", f"session_{sid}.json", f"session_{sid}.jsonl",
+                )]
+                artifacts.extend(sessions_dir.glob(f"request_dump_{glob.escape(sid)}_*.json"))
+                for artifact in artifacts:
+                    artifact.unlink(missing_ok=True)
+                # reset_session already replaced the route. The old Hermes API
+                # has no remove_by_session_id, and removing the new route is wrong.
                 logger.info("[pipefacil] Removed Hermes transcript for reset session %s", session_id)
                 with self._history_reset_lock:
                     self._pending_reset_purges.pop(str(session_id), None)
@@ -856,16 +886,23 @@ class PipefacilAdapter(BasePlatformAdapter):
     async def send_typing(self, chat_id: str, metadata: dict[str, Any] | None = None) -> None:
         return None
 
+    async def send_private_notice(
+        self, chat_id: str, user_id: str, content: str, *, metadata: dict[str, Any] | None = None,
+    ) -> SendResult:
+        """Keep gateway setup and operational notices out of public lead chats."""
+        logger.info("[pipefacil] Suppressed a gateway operational notice in a lead conversation")
+        return SendResult(success=True)
+
     def _fail(self, code: str, message: str) -> bool:
         self._set_fatal_error(code, message, retryable=code in {"bind_failed", "upstream_unavailable"})
         return False
 
 
-def adapter_for_profile(profile_home: Path, chat_id: str) -> PipefacilAdapter | None:
+def adapter_for_profile(profile_home: Path, chat_id: str | None = None) -> PipefacilAdapter | None:
     """Resolve only the active profile's connected adapter and webhook destination."""
     with _ADAPTERS_LOCK:
         adapter = _ADAPTERS_BY_PROFILE.get(str(Path(profile_home).resolve()))
-    if adapter is None or str(chat_id) not in adapter._destinations:
+    if adapter is None or (chat_id is not None and str(chat_id) not in adapter._destinations):
         return None
     return adapter
 
@@ -922,13 +959,10 @@ def _on_session_finalize(
 ) -> None:
     if platform != "pipefacil" or reason != "new_session" or not session_id:
         return
-    from hermes_constants import get_hermes_home
-
     with _ADAPTERS_LOCK:
         adapters = list(_ADAPTERS_BY_PROFILE.values())
-    sessions_dir = Path(get_hermes_home()) / "sessions"
     for adapter in adapters:
-        if adapter.purge_reset_session(session_id, sessions_dir=sessions_dir):
+        if adapter.purge_reset_session(session_id, sessions_dir=adapter.profile_home / "sessions"):
             return
 
 
@@ -970,7 +1004,10 @@ def register(ctx) -> None:
             "The customer is not speaking to Hermes as a CLI assistant. Reply as the configured sales "
             "profile; do not claim to be inside WhatsApp or Pipefacil. The inbound turn includes recent "
             "Pipefacil conversation history from all participants. The final answer is sent to the lead "
-            "through the Pipefacil API."
+            "through the Pipefacil API automatically. For a normal text reply, write the customer-facing "
+            "answer directly; no send tool is needed. Use pipefacil_send_messages only for preliminary "
+            "split messages or approved media. An unavailable reference file does not prevent you from "
+            "answering with known facts or asking a short qualifying question."
         ),
         **_optional_registration_fields(notify_missing_home_channel=False),
     )

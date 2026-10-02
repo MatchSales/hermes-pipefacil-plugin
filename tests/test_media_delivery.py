@@ -124,27 +124,6 @@ def test_profile_allowlist_api_payload_order_and_partial_result(tmp_path, monkey
     assert set(send_schema["properties"]) == {"messages"}
     assert send_schema["properties"]["messages"]["maxItems"] == 2
 
-    from hermes_state import SessionDB
-
-    routing_db = SessionDB(db_path=profile_a / "state.db")
-    try:
-        routing_db.save_gateway_routing_entry("pipefacil:lead", json.dumps({
-            "session_key": "pipefacil:lead",
-            "session_id": "active-pipe-session",
-            "origin": {"platform": "pipefacil", "chat_id": "channel-1:+5511999999999"},
-        }))
-        routing_db.save_gateway_routing_entry("cli:operator", json.dumps({
-            "session_key": "cli:operator",
-            "session_id": "operator-session",
-            "origin": {"platform": "cli", "chat_id": "local"},
-        }))
-    finally:
-        routing_db.close()
-    assert tools._active_pipefacil_chat("active-pipe-session", profile_a) == (
-        "channel-1:+5511999999999", ""
-    )
-    assert tools._active_pipefacil_chat("operator-session", profile_a)[0] is None
-
     home_module = __import__("hermes_constants")
     monkeypatch.setattr(home_module, "get_hermes_home", lambda: profile_a)
     monkeypatch.setattr(tools, "_active_pipefacil_chat", lambda session_id, home: ("channel-1:+5511999999999", ""))

@@ -143,6 +143,11 @@ the API accepted the request, not that WhatsApp delivery was confirmed. Reads ar
 turn attachments and files under this profile's `knowledge/` folder. Do not enable Hermes' `file`
 toolset for a public-facing agent; it also exposes writing and patching tools.
 
+For ordinary text replies, the agent should write its final answer directly; Hermes delivers it
+automatically. Use `pipefacil_send_messages` only for preliminary split messages or approved media.
+To discover approved reference files, call `pipefacil_read_profile_file` with `path: knowledge/`,
+then read an exact listed path. Wildcards and listing the profile root are not supported.
+
 ### Profile media library
 
 List each HTTPS media URL the agent may share in that profile's `SOUL.md`, with a label and type (`image`
@@ -195,14 +200,18 @@ restoration support. The API key is still required for outbound replies and CRM 
 An authorized number in `reset_allowed_users` can send `/reset` by itself to start from a clean context. Hermes opens a new session, the plugin removes
 the previous local transcript, and future turns ignore Pipefacil history from before the reset message.
 The original CRM messages remain in Pipefacil; this command clears the agent's context without deleting
-the customer conversation.
+the customer conversation. Observability records and other profiles' sessions are preserved.
 
 ## Compatibility note
 
-When Hermes exposes the `notify_missing_home_channel` platform capability, this plugin disables the
-personal `/sethome` onboarding notice for Pipefacil leads. Older Hermes hosts do not receive that
-option; the plugin remains loadable, but the host may show its usual home-channel notice on a new
-conversation.
+Version 0.3.1 is tested with Hermes 0.21.5 (`749220ef`), including two secondary profiles in a shared
+gateway. Tool routing uses the gateway's live session index; each profile keeps its own transcripts.
+The plugin supports both the legacy and guarded session-deletion signatures.
+
+Pipefacil defaults to `notice_delivery: private` and suppresses private gateway setup notices, so
+public leads do not receive `/sethome` instructions even on older hosts. On hosts that expose
+`notify_missing_home_channel`, the plugin also disables that notice at registration.
+For public profiles, set `onboarding.profile_build: "off"` to disable personal-profile onboarding.
 
 ## Inbound media
 
