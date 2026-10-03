@@ -359,7 +359,8 @@ class PipefacilAdapter(BasePlatformAdapter):
 
     async def _handle_health(self, request):
         from aiohttp import web
-        return web.json_response({"status": "ok", "platform": "pipefacil"})
+        return web.json_response({"status": "ok", "platform": "pipefacil",
+                                  "max_message_age_seconds": self.max_message_age_seconds})
 
     def _runtime_scope(self):
         from gateway.run import _profile_runtime_scope
