@@ -212,6 +212,13 @@ class PipefacilAdapter(BasePlatformAdapter):
             return self._fail("config_missing", "Set PIPEFACIL_API_KEY in this profile's .env")
         if not (1 <= self.port <= 65535):
             return self._fail("config_invalid", "Pipefacil webhook port must be between 1 and 65535")
+        try:
+            # Validate writable receipt storage before advertising a connected channel,
+            # instead of discovering a profile-volume permission error on the first lead.
+            await asyncio.to_thread(claim_messages, self.profile_home, "", [], now=time.time())
+        except (OSError, sqlite3.Error):
+            logger.exception("[pipefacil] Inbound receipt storage is unavailable")
+            return self._fail("storage_unavailable", "Pipefacil inbound receipt storage must be writable in this profile")
         key_fingerprint = hashlib.sha256(self.api_key.encode()).hexdigest()[:16]
         if not self._acquire_platform_lock("pipefacil", key_fingerprint, "Pipefacil API key"):
             return False

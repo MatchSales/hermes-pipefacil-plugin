@@ -390,6 +390,32 @@ def test_gateway_operator_notices_are_not_sent_to_leads(multiplex, monkeypatch):
     assert sent == []
 
 
+@pytest.mark.parametrize("storage_error", [False, True])
+def test_connection_checks_receipt_storage_before_opening_webhook(multiplex, monkeypatch, storage_error):
+    import sqlite3
+    from gateway.config import PlatformConfig
+    from gateway.platforms import shared_ingress
+    m = multiplex
+    adapter = m.module.PipefacilAdapter(PlatformConfig(enabled=True, extra={}))
+    adapter.api_key = "test-key"
+    monkeypatch.setattr(adapter, "_acquire_platform_lock", lambda *args: True)
+    monkeypatch.setattr(adapter, "_release_platform_lock", lambda: None)
+    bound = []
+
+    async def bind(*args, **kwargs):
+        with sqlite3.connect(adapter.profile_home / "pipefacil-state" / "inbox.sqlite3") as db:
+            assert db.execute("SELECT count(*) FROM receipts").fetchone()[0] == 0
+        bound.append(True)
+        return None
+    monkeypatch.setattr(shared_ingress, "bind_listener", bind)
+    if storage_error:
+        def fail(*args, **kwargs):
+            raise sqlite3.OperationalError("read-only profile")
+        monkeypatch.setattr(m.module, "claim_messages", fail)
+    assert asyncio.run(adapter.connect()) is (not storage_error)
+    assert bound == ([] if storage_error else [True])
+
+
 def test_real_hermes_busy_reply_is_suppressed_but_background_answer_is_delivered(multiplex, monkeypatch):
     from dataclasses import replace
     from gateway.config import PlatformConfig
