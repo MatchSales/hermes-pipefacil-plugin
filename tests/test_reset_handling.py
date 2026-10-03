@@ -146,7 +146,6 @@ def test_reset_confirmation_follows_session_cleanup_and_history_boundary(tmp_pat
     adapter._pending_reset_purges = {"old-session": "pipefacil:lead"}
     adapter._reset_purge_results = {}
     adapter.reset_allowed_users = {"5511999999999"}
-    adapter._seen_message_ids = {}
     adapter._runtime_scope = contextlib.nullcontext
     adapter._build_contact_source = lambda **kwargs: SimpleNamespace(
         user_id="lead", user_name="Lead", message_id=kwargs["message_id"],
@@ -169,7 +168,7 @@ def test_reset_confirmation_follows_session_cleanup_and_history_boundary(tmp_pat
         return True
 
     adapter.gateway_runner = SimpleNamespace(_handle_reset_command=reset_session)
-    adapter.send = send
+    adapter._send_control_reply = send
     adapter._record_history_reset = record_boundary
     adapter.handle_message = lambda event: pytest.fail("/reset must not enter the confirmation prompt")
     adapter.purge_reset_session = lambda *args, **kwargs: False
@@ -200,7 +199,7 @@ def test_reset_from_public_lead_is_rejected_without_rotating_session(tmp_path, m
     async def send(chat_id, text):
         sent.append(text)
 
-    adapter.send = send
+    adapter._send_control_reply = send
     adapter._mark_session_for_reset_purge = lambda source: pytest.fail("public reset must be denied")
     asyncio.run(adapter._process_event(
         payload={"data": {}},

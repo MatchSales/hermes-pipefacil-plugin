@@ -8,7 +8,7 @@ sends the final answer through the Pipefacil API, and provides a narrowly scoped
 
 ## Features
 
-- Accepts Pipefacil `message.received` webhooks without signature or timestamp verification.
+- Accepts Pipefacil `message.received` webhooks without signature verification; validates each message's original timestamp and rejects historical replays.
 - Loads recent conversation messages from every participant, not only messages sent by Hermes.
 - Replies to the lead through the Pipefacil API.
 - Registers `pipefacil_send_messages` to send up to two additional text, image, or document messages before Hermes sends its final answer automatically.
@@ -118,6 +118,7 @@ platforms:
       port: 8645      # shared gateways use the default listener's port
       path: /events/message-received
       history_limit: 100 # from 1 to 200
+      max_message_age_seconds: 300 # from 1 to 3600; original message time
       allowed_users:
         - "*"
       reset_allowed_users: [] # authorized test numbers with country and area code
@@ -134,6 +135,24 @@ agent:
 The wildcard allowlist permits any lead identity in an inbound webhook to reach the agent. This
 version does not authenticate webhook requests: anyone who can reach the callback can submit an event
 that triggers an agent response or a deal update. Restrict access at the ingress and use HTTPS.
+
+### Replay protection
+
+Messages must have an original `timestamp` with a timezone (or a numeric Unix timestamp in seconds
+or milliseconds). By default, messages older than 300 seconds, missing/invalid timestamps, and times
+more than 30 seconds in the future are ignored with HTTP 200. A recent delivery header does not make
+an old message new. In mixed batches only recent messages are admitted. This also applies to `/reset`.
+
+Admission receipts are stored in `<profile>/pipefacil-state/inbox.sqlite3` for seven days, scoped by
+conversation and message identity, without storing the message body or phone number. Preserve the
+profile volume across deployments. Reconnects, restarts, and `/reset` preserve these receipts. Storage
+failure returns HTTP 503 before the agent runs. After admission, receipts survive processing errors
+because a send's outcome may be ambiguous; the same webhook is not automatically run again. A customer
+can send a new message to continue the conversation.
+
+To change the five-minute window manually, edit the selected profile's YAML in the dashboard and set
+`platforms.pipefacil.extra.max_message_age_seconds`, then restart that profile's gateway. Valid values
+are 1–3600 seconds; zero does not disable the protection. Signature authentication remains disabled.
 
 The `pipefacil` toolset contains response tools, an update tool bound to the current event's deal,
 and `pipefacil_read_profile_file`. The send tool uses the
@@ -208,14 +227,16 @@ the customer conversation. Observability records and other profiles' sessions ar
 
 ## Compatibility note
 
-Version 0.3.3 is tested with Hermes 0.21.5 (`749220ef`), including two secondary profiles in a shared
+Version 0.3.5 is tested with Hermes 0.21.5 (`749220ef`), including two secondary profiles in a shared
 gateway. Tool routing uses the gateway's live session index; each profile keeps its own transcripts.
 The plugin supports both the legacy and guarded session-deletion signatures.
 Trusted tool facts follow the actual background-processing callbacks. Each worker retains its own
 event context, and access is revoked when processing completes, fails, or is cancelled.
 
-Pipefacil defaults to `notice_delivery: private` and suppresses private gateway setup notices, so
-public leads do not receive `/sethome` instructions even on older hosts. On hosts that expose
+Pipefacil defaults to `notice_delivery: private` and suppresses gateway setup, busy/interrupt,
+onboarding, and internal error notices, including legacy hosts that call `send()` directly. Automatic
+answers require the exact live customer turn; delayed recovery sends are suppressed. Explicit plugin
+reset replies remain available to configured test numbers. On hosts that expose
 `notify_missing_home_channel`, the plugin also disables that notice at registration.
 For public profiles, set `onboarding.profile_build: "off"` to disable personal-profile onboarding.
 

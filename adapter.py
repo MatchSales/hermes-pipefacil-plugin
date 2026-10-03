@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import re
+import sqlite3
 import sys
 import threading
 import time
@@ -35,6 +36,7 @@ from .api import (
     send_message,
 )
 from .media import InboundMediaResult, download_inbound_media
+from .inbox import DEFAULT_MAX_MESSAGE_AGE_SECONDS, claim_messages, fresh_messages
 from .reset import (
     _history_after_reset,
     _messages_after_reset,
@@ -56,6 +58,7 @@ _PRELIMINARY_SENDS_LOCK = threading.Lock()
 _ADAPTERS_BY_PROFILE: dict[str, "PipefacilAdapter"] = {}
 _ACTIVE_PIPEFACIL_TURN: ContextVar[Any] = ContextVar("active_pipefacil_turn", default=None)
 _PRELIMINARY_SEND_COUNTS: dict[tuple[str, str], tuple[int, float]] = {}
+_CONTROL_REPLY = object()
 
 
 def _new_message_event(**kwargs: Any) -> MessageEvent:
@@ -178,6 +181,9 @@ class PipefacilAdapter(BasePlatformAdapter):
         self.port = int(extra.get("port", DEFAULT_PORT))
         self.webhook_path = _safe_path(extra.get("path", DEFAULT_PATH))
         self.history_limit = max(1, min(int(extra.get("history_limit", DEFAULT_HISTORY_LIMIT)), 200))
+        self.max_message_age_seconds = int(extra.get("max_message_age_seconds", DEFAULT_MAX_MESSAGE_AGE_SECONDS))
+        if not 1 <= self.max_message_age_seconds <= 3600:
+            raise ValueError("Pipefacil max_message_age_seconds must be between 1 and 3600")
         reset_users = extra.get("reset_allowed_users")
         self.reset_allowed_users = {
             re.sub(r"\D", "", str(value))
@@ -191,7 +197,6 @@ class PipefacilAdapter(BasePlatformAdapter):
         self._app = None
         self._runner = None
         self._inbound_tasks: set[asyncio.Task] = set()
-        self._seen_message_ids: dict[str, float] = {}
         self._destinations: dict[str, dict[str, str]] = {}
         self._history_reset_lock = threading.RLock()
         self._history_reset_loaded = False
@@ -263,7 +268,6 @@ class PipefacilAdapter(BasePlatformAdapter):
             self._runner = None
         self._app = None
         self._destinations.clear()
-        self._seen_message_ids.clear()
         with self._turn_context_lock:
             self._active_turn_context.clear()
         with _ADAPTERS_LOCK:
@@ -324,6 +328,14 @@ class PipefacilAdapter(BasePlatformAdapter):
         reply_to: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> SendResult:
+        control_reply = metadata and metadata.get("_pipefacil_control_reply") is _CONTROL_REPLY
+        live_reply = metadata and metadata.get("notify") and self._live_turn_context(chat_id) is not None
+        if not control_reply and not live_reply:
+            # Older Hermes sends busy/onboarding/error notices through send(), bypassing
+            # send_private_notice. Only a live customer reply or our explicit /reset reply
+            # may leave this adapter. Successful suppression prevents automatic retries.
+            logger.info("[pipefacil] Suppressed gateway notice or reply outside a live customer turn")
+            return SendResult(success=True)
         if not content.strip():
             return SendResult(success=False, error="Refusing to send an empty Pipefacil message")
         if metadata and metadata.get("notify"):
@@ -337,6 +349,9 @@ class PipefacilAdapter(BasePlatformAdapter):
             logger.warning("[pipefacil] Message delivery failed (HTTP %s): %s", exc.status_code or "transport", exc)
             return SendResult(success=False, error=str(exc))
         return SendResult(success=True, message_id=result["message_id"])
+
+    async def _send_control_reply(self, chat_id: str, content: str) -> SendResult:
+        return await self.send(chat_id, content, metadata={"_pipefacil_control_reply": _CONTROL_REPLY})
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         destination = self._destinations.get(str(chat_id), {})
@@ -390,14 +405,24 @@ class PipefacilAdapter(BasePlatformAdapter):
             if not messages:
                 return web.json_response({"error": "at least one message is required"}, status=422)
 
-            fresh_messages = self._claim_new_messages(messages, phone)
-            if not fresh_messages:
-                return web.json_response({"status": "duplicate"}, status=200)
-
             channel_id = str(channel.get("id") or "").strip()
             phone_number_id = str(channel.get("phoneNumberId") or "").strip()
             chat_scope = channel_id or phone_number_id or "default"
             chat_id = f"{chat_scope}:{phone}"
+            now = time.time()
+            recent_messages = fresh_messages(messages, now=now, max_age=self.max_message_age_seconds)
+            if not recent_messages:
+                logger.info("[pipefacil] Ignored webhook without recent messages (%d rejected)", len(messages))
+                return web.json_response({"status": "ignored", "reason": "no recent messages"}, status=200)
+            if len(recent_messages) != len(messages):
+                logger.info("[pipefacil] Rejected %d non-recent messages from mixed webhook", len(messages) - len(recent_messages))
+            try:
+                new_messages = await asyncio.to_thread(claim_messages, self.profile_home, chat_id, recent_messages, now=now)
+            except (OSError, sqlite3.Error):
+                logger.exception("[pipefacil] Could not persist inbound receipts; refused webhook admission")
+                return web.json_response({"error": "inbound receipt storage unavailable"}, status=503)
+            if not new_messages:
+                return web.json_response({"status": "duplicate"}, status=200)
             self._destinations[chat_id] = {
                 "phone": phone,
                 "channel_id": channel_id,
@@ -407,35 +432,20 @@ class PipefacilAdapter(BasePlatformAdapter):
             task = asyncio.create_task(
                 self._process_event(
                     payload=payload,
-                    messages=fresh_messages,
+                    messages=new_messages,
                     contact=contact,
                     channel=channel,
                     chat_id=chat_id,
                     phone=phone,
                 ),
-                name=f"pipefacil:{chat_scope}:{_message_identity(fresh_messages[-1], phone)}",
+                name=f"pipefacil:{chat_scope}:{_message_identity(new_messages[-1], phone)}",
             )
             self._inbound_tasks.add(task)
             task.add_done_callback(self._inbound_task_finished)
             return web.json_response(
-                {"status": "accepted", "message_id": str(fresh_messages[-1].get("id") or "")},
+                {"status": "accepted", "message_id": str(new_messages[-1].get("id") or "")},
                 status=200,
             )
-
-    def _claim_new_messages(self, messages: list[dict[str, Any]], phone: str) -> list[dict[str, Any]]:
-        now = time.monotonic()
-        if len(self._seen_message_ids) > 10_000:
-            cutoff = now - 3600
-            self._seen_message_ids = {key: seen for key, seen in self._seen_message_ids.items() if seen >= cutoff}
-        fresh = []
-        for message in messages:
-            key = _message_identity(message, phone)
-            if key in self._seen_message_ids:
-                continue
-            self._seen_message_ids[key] = now
-            message["_pipefacil_delivery_key"] = key
-            fresh.append(message)
-        return fresh
 
     def _inbound_task_finished(self, task: asyncio.Task) -> None:
         self._inbound_tasks.discard(task)
@@ -463,7 +473,7 @@ class PipefacilAdapter(BasePlatformAdapter):
         reset_index = _reset_command_index(messages)
         if reset_index is not None:
             if re.sub(r"\D", "", phone) not in self.reset_allowed_users:
-                await self.send(chat_id, "Comando não disponível neste atendimento.")
+                await self._send_control_reply(chat_id, "Comando não disponível neste atendimento.")
                 return
             reset_message = messages[reset_index]
             source = self._build_contact_source(
@@ -475,7 +485,7 @@ class PipefacilAdapter(BasePlatformAdapter):
             reset_message_id = str(reset_message.get("id") or reset_message.get("externalId") or "")
             purge_session_id = self._mark_session_for_reset_purge(source)
             if purge_session_id is None:
-                await self.send(
+                await self._send_control_reply(
                     chat_id,
                     "Não consegui preparar a limpeza desta sessão. O /reset não foi aplicado; tente novamente.",
                 )
@@ -503,9 +513,8 @@ class PipefacilAdapter(BasePlatformAdapter):
                     await runner._handle_reset_command(event)
             except Exception:
                 self._discard_pending_reset_purge(purge_session_id)
-                self._release_message_claims(messages)
                 logger.warning("[pipefacil] Could not reset the Hermes session", exc_info=True)
-                await self.send(chat_id, "Não consegui reiniciar a sessão do SDR. Tente /reset novamente.")
+                await self._send_control_reply(chat_id, "Não consegui reiniciar a sessão do SDR. Tente /reset novamente.")
                 return
             with self._history_reset_lock:
                 purged = self._reset_purge_results.pop(purge_session_id, False)
@@ -516,7 +525,7 @@ class PipefacilAdapter(BasePlatformAdapter):
                     purged = self._reset_purge_results.pop(purge_session_id, False)
             if not purged:
                 self._discard_pending_reset_purge(purge_session_id)
-                await self.send(
+                await self._send_control_reply(
                     chat_id,
                     "A sessão nova foi aberta, mas não consegui apagar o transcript anterior. "
                     "O /reset não foi concluído; tente novamente.",
@@ -526,13 +535,13 @@ class PipefacilAdapter(BasePlatformAdapter):
                 self._record_history_reset, chat_id, reset_epoch, reset_message_id,
             )
             if not reset_saved:
-                await self.send(
+                await self._send_control_reply(
                     chat_id,
                     "A sessão local foi apagada, mas não consegui isolar o histórico do Pipefacil. "
                     "O /reset não foi concluído; tente novamente.",
                 )
                 return
-            await self.send(chat_id, "Contexto do SDR apagado. Pode começar o teste do zero.")
+            await self._send_control_reply(chat_id, "Contexto do SDR apagado. Pode começar o teste do zero.")
             later_inbound = _messages_after_reset(messages, reset_index)
             if later_inbound:
                 await self._process_event(
@@ -694,11 +703,7 @@ class PipefacilAdapter(BasePlatformAdapter):
             "deal_seq": trusted_seq,
             "media_paths": frozenset(str(Path(path).resolve()) for path in media_urls),
         }
-        try:
-            await self.handle_message(event)
-        except Exception:
-            self._release_message_claims(messages)
-            raise
+        await self.handle_message(event)
 
     async def on_processing_start(self, event: MessageEvent) -> None:
         """Bind facts when Hermes actually starts the background model turn."""
@@ -762,12 +767,6 @@ class PipefacilAdapter(BasePlatformAdapter):
         if accepted and final == normalize(" ".join(message["text"] for message in accepted)):
             return accepted[-1]
         return None
-
-    def _release_message_claims(self, messages: list[dict[str, Any]]) -> None:
-        for message in messages:
-            key = message.get("_pipefacil_delivery_key")
-            if key:
-                self._seen_message_ids.pop(str(key), None)
 
     def _build_contact_source(self, *, chat_id: str, contact: dict[str, Any], message_id: str | None):
         phone = str(contact.get("phone") or "")
@@ -1000,7 +999,9 @@ def validate_config(config: PlatformConfig) -> bool:
     try:
         _safe_path(extra.get("path", DEFAULT_PATH))
         normalize_api_base_url(extra.get("api_base_url", DEFAULT_API_BASE_URL))
-    except (ValueError, PipefacilAPIError):
+        if not 1 <= int(extra.get("max_message_age_seconds", DEFAULT_MAX_MESSAGE_AGE_SECONDS)) <= 3600:
+            return False
+    except (TypeError, ValueError, PipefacilAPIError):
         return False
     return _credentials_present()
 

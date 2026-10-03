@@ -8,7 +8,7 @@ uma ferramenta restrita para atualizar o negócio no CRM.
 
 ## O que ele faz
 
-- Aceita webhooks `message.received` sem validar a assinatura nem o timestamp.
+- Aceita webhooks `message.received` sem validar a assinatura; verifica o horário original de cada mensagem para rejeitar eventos antigos.
 - Busca mensagens recentes de todos os participantes da conversa, não apenas as enviadas pelo Hermes.
 - Envia a resposta final do agente ao lead pela API do Pipefacil.
 - Registra `pipefacil_send_messages`, que permite enviar até duas mensagens adicionais (texto, imagem ou documento) antes da resposta final automática do Hermes.
@@ -120,6 +120,7 @@ platforms:
       port: 8645      # no gateway compartilhado, vale a porta do listener default
       path: /events/message-received
       history_limit: 100 # de 1 a 200
+      max_message_age_seconds: 300 # de 1 a 3600; horário original da mensagem
       allowed_users:
         - "*"
       reset_allowed_users: [] # números de teste autorizados, com DDI e DDD
@@ -137,6 +138,26 @@ A allowlist `*` permite que qualquer identidade de lead recebida por webhook che
 versão não autentica o webhook: qualquer pessoa que alcançar o callback pode enviar um evento que
 dispare uma resposta do agente ou uma atualização no CRM. Restrinja o acesso na entrada pública e
 use HTTPS.
+
+### Proteção contra reenvios
+
+Cada mensagem precisa de `timestamp` original com fuso horário, ou horário Unix numérico em segundos
+ou milissegundos. Por padrão, mensagens com mais de cinco minutos, sem horário válido ou mais de
+30 segundos no futuro são ignoradas com HTTP 200. O horário novo do envio do webhook não transforma
+uma mensagem antiga em nova. Em lotes mistos, apenas as mensagens recentes entram. Isso vale também
+para `/reset`.
+
+O registro de mensagens admitidas fica em `<profile>/pipefacil-state/inbox.sqlite3` por sete dias,
+separado por conversa e identidade da mensagem, sem guardar texto ou telefone. Preserve o volume do
+profile nas atualizações. Reinícios, reconexões e `/reset` mantêm esse registro. Falha ao salvar o
+registro retorna HTTP 503 antes de chamar o agente. Após a admissão, erros de processamento não
+liberam o mesmo evento para repetir o envio, pois o resultado de um envio pode ser incerto. O cliente
+pode mandar uma mensagem nova para continuar.
+
+Para alterar a janela manualmente, edite o YAML do profile selecionado no dashboard, ajuste
+`platforms.pipefacil.extra.max_message_age_seconds` e reinicie o gateway desse profile. O intervalo
+permitido é de 1 a 3600 segundos; zero não desativa a proteção. A autenticação por assinatura continua
+desativada.
 
 O toolset `pipefacil` contém as ferramentas de resposta, atualização do negócio do evento atual e
 `pipefacil_read_profile_file`. O envio de mensagens
@@ -205,9 +226,11 @@ agente, não apaga a conversa do Pipefacil.
 
 ## Compatibilidade
 
-Quando o Hermes oferece o recurso de plataforma `notify_missing_home_channel`, o plugin desativa o
-aviso pessoal `/sethome` para os leads do Pipefacil. Em versões antigas, o plugin continua carregando,
-mas o Hermes pode exibir seu aviso normal de canal inicial em uma conversa nova.
+A versão 0.3.5 foi testada com Hermes 0.21.5 (`749220ef`) e dois profiles em gateway compartilhado.
+O plugin bloqueia avisos internos de configuração, interrupção, fila, onboarding e erros, inclusive
+em versões que chamam `send()` diretamente. Respostas automáticas exigem o turno atual do cliente;
+reenvios de recuperação fora desse turno são suprimidos. As confirmações explícitas de `/reset`
+continuam disponíveis aos números de teste autorizados. A observabilidade é preservada.
 
 ## Mídia recebida
 

@@ -171,9 +171,9 @@ def test_final_reply_does_not_repeat_api_accepted_text_from_the_same_turn(multip
             # A useful new final answer still sends; comparison is exact except for whitespace.
             assert (await adapter.send(m.chat_id, "A new qualifying question", metadata={"notify": True})).success
             assert len(sent) == 3
-        # An unrelated turn cannot reuse this event's accepted texts.
+        # A completed event cannot trigger a delayed/proactive delivery.
         assert (await adapter.send(m.chat_id, final_text, metadata={"notify": True})).success
-        assert len(sent) == 4
+        assert len(sent) == 3
 
     try:
         asyncio.run(scenario())
@@ -385,5 +385,54 @@ def test_gateway_operator_notices_are_not_sent_to_leads(multiplex, monkeypatch):
     monkeypatch.setattr(adapter, "send_api_message", send)
     result = asyncio.run(adapter.send_private_notice("chat", "lead", "Type /sethome to configure Hermes"))
     assert result.success and sent == []
-    assert asyncio.run(adapter.send("chat", "Normal customer reply")).success
-    assert sent == [{"type": "text", "text": "Normal customer reply"}]
+    assert asyncio.run(adapter.send("chat", "⚡ Interrupting current task")).success
+    assert asyncio.run(adapter.send("chat", "Normal customer reply", metadata={"notify": True})).success
+    assert sent == []
+
+
+def test_real_hermes_busy_reply_is_suppressed_but_background_answer_is_delivered(multiplex, monkeypatch):
+    from dataclasses import replace
+    from gateway.config import PlatformConfig
+    from gateway.platforms.event import MessageType
+    from gateway.run import GatewayRunner
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    m = multiplex
+    token = set_hermes_home_override(str(m.homes["sdr-a"]))
+    adapter = m.module.PipefacilAdapter(PlatformConfig(enabled=True, extra={}))
+    adapter.gateway_runner = SimpleNamespace(session_store=m.store)
+    sent = []
+
+    async def send(chat_id, message):
+        sent.append(message)
+        return {"message_id": "customer-answer"}
+
+    monkeypatch.setattr(adapter, "send_api_message", send)
+    # Avoid the core's separate boot-recovery ledger in this isolated regression.
+    async def no_obligation(*args):
+        return None
+    monkeypatch.setattr(adapter, "_record_delivery_obligation", no_obligation)
+    event = m.module._new_message_event(
+        text="Oi", message_type=MessageType.TEXT, user_id="test-contact",
+        source=replace(m.entries["sdr-a"].origin, message_id="fresh"), message_id="fresh",
+        allow_gateway_control=False,
+    )
+    event._pipefacil_turn_context = {"deal_seq": 106, "media_paths": frozenset()}
+
+    async def scenario():
+        async def handler(current):
+            # Even inside an active turn the native busy notice has no reply marker.
+            runner = object.__new__(GatewayRunner)
+            await runner._send_busy_reply(current, adapter, "⚡ Interrupting current task. I'll respond shortly.\n💡 First-time tip: /busy queue")
+            assert sent == []
+            return "Oi! Como posso ajudar?"
+        adapter.set_message_handler(handler)
+        await adapter.handle_message(event)
+        await asyncio.gather(*list(adapter._session_tasks.values()))
+        assert sent == [{"type": "text", "text": "Oi! Como posso ajudar?"}]
+        await adapter.send(m.chat_id, "Late recovery reply", metadata={"notify": True})
+        assert len(sent) == 1
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        reset_hermes_home_override(token)

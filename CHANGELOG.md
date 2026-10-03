@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.5
+
+- Ignore messages older than five minutes, missing/invalid message timestamps, and timestamps more than 30 seconds in the future. Use the message's original time, including for `/reset`, rather than the webhook delivery header. Configure `platforms.pipefacil.extra.max_message_age_seconds` from 1 to 3600 seconds (default 300).
+- Persist inbound message receipts per profile and conversation before dispatch. Replays, reconnects, and gateway restarts cannot readmit the same message; `/reset` preserves the receipts. If receipt storage fails, refuse admission with HTTP 503.
+- Keep busy, interrupt, onboarding, internal errors, and delayed recovery notices out of public chats on older Hermes versions. Allow automatic final answers only within the exact live customer turn, plus explicit plugin `/reset` replies.
+- Regression-test the historical 27-message burst, concurrent/restarted receipt storage, and Hermes 0.21.5's real busy and automatic final-answer paths without messaging clients.
+
 ## 0.3.4
 
 - Keep final answers addressed to the lead after split sends, without narrating API or delivery status. Reuse the accepted texts as the final answer when they already answer the customer completely.
