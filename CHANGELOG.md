@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1
+
+- Decode compressed CRM API responses once. Preserve HTTP errors and the 2 MiB decompressed response limit. Fix gzip/deflate history and upload responses being incorrectly reported as network failures.
+- Add response regression tests for GET, multipart POST, compressed errors and oversized/invalid envelopes. Existing uncertain upload outcomes still require operator review; the update does not automatically replay them.
+
 ## 0.4.0
 
 - Require the original AI-agent HMAC secret, support current/next signatures and verify the exact JSON before gzip. Handle both raw gzip and Hermes' already-decompressed shared-listener requests.
