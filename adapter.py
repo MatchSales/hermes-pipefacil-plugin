@@ -42,6 +42,8 @@ from .state import State, StateError, Full, Conflict, digest
 from .library import read_asset
 from .crm import CRM
 from .guidance import PIPEFACIL_CHANNEL_PROMPT
+from .shared_guidance import SHARED_GUIDANCE_REVISION
+from . import __version__
 from .reset import (
     _history_after_reset,
     _messages_after_reset,
@@ -491,14 +493,16 @@ class PipefacilAdapter(BasePlatformAdapter):
 
     async def _handle_health(self, request):
         from aiohttp import web
+        contract = {"pluginVersion": __version__, "guidanceRevision": SHARED_GUIDANCE_REVISION,
+                    "capabilities": {"text": True, "crmTools": True, "inboundMedia": True, "outboundMedia": True}}
         try:
             state = await asyncio.to_thread(self.state.status)
             ready = not self._closing and self._ready_error is None and bool(self.webhook_secret) and callable(self._message_handler)
             return web.json_response({"status": "ready" if ready else "not_ready", "platform": "pipefacil",
                                       "error": self._ready_error, "counters": self._counts,
-                                      "workers": len(self._workers), **state}, status=200 if ready else 503)
+                                      "workers": len(self._workers), **state, **contract}, status=200 if ready else 503)
         except (OSError, sqlite3.Error, StateError):
-            return web.json_response({"status": "not_ready", "error": "state_unavailable"}, status=503)
+            return web.json_response({"status": "not_ready", "error": "state_unavailable", **contract}, status=503)
 
     def _runtime_scope(self):
         from gateway.run import _profile_runtime_scope

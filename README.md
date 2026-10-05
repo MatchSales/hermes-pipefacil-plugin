@@ -307,3 +307,9 @@ text layer may not extract.
 
 No open-source license has been selected yet. See [LICENSE-NOTICE.md](LICENSE-NOTICE.md); public
 visibility does not grant reuse rights.
+
+## Compatibilidade HTTP/Kafka (0.4.3)
+
+As orientações comuns têm revisão e fonte compartilhadas com o Kafka 0.1.1. Consulte
+[o contrato de compatibilidade e atualização coordenada](docs/plugin-parity.md).
+O health informa versão, revisão e capacidades. Os nomes e limites específicos de mídia permanecem próprios deste canal.

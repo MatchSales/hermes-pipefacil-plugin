@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "revision": 1,
+  "sha256": "79f3cec23421b2e7b68a736a5b57ca9f82e2955b4bec3fc6e28cf1eee32fb2ee",
+  "compatibleKafkaVersion": "0.1.1"
+}
