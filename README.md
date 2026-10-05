@@ -226,6 +226,33 @@ Never-started jobs are recoverable; interrupted or ambiguous writes require oper
 See [HTTP architecture, limits, schemas and operations](docs/http-runtime.md) and
 [the Portuguese setup instructions](README.pt-BR.md). Native audio transcription requires a configured STT provider.
 
+### Automatic tool guidance (0.4.2)
+
+Each Pipefacil lead turn now carries a static, trusted `MessageEvent.channel_prompt` using
+Hermes' native per-channel context. It complements the profile's instructions without editing
+SOUL.md, and applies to existing conversations on their next turn after updating the plugin
+and restarting the gateway. No customer text, filenames, links or secrets are interpolated
+into this instruction block.
+
+The guidance tells the agent to list approved media before answering requests such as
+“send me the presentation”, choose a returned `fileId`, and send the actual file. Reference
+files in `knowledge/` are distinct from the sending library in `media/`. Failed catalog calls
+are not empty catalogs, and ambiguous choices require a short clarification. Operators must
+still supply the approved files and commercial rules.
+
+For deferred tools, describe the exact tool name, then invoke one local tool per `tool_call`.
+If searching is needed, query only the exact name with underscores. Hermes uses lexical
+search and can reject a query containing an intent word absent from all tool descriptions.
+All five tools now share their registration and schema descriptions, with Portuguese and
+English media/CRM terms to improve discovery.
+
+This is model guidance, not proof that every natural request works. After deployment, ask
+for an identifiable synthetic presentation without mentioning tools or IDs, verify the
+received attachment, repeat the request to check storage-object reuse, and check an empty
+library in a separate test conversation. API acceptance alone is not confirmed delivery.
+Update the target profile explicitly and restart its gateway (the `default` gateway for
+shared installations). No transcript reset or SOUL edit is required.
+
 ## Conversation context
 
 Before each turn, the plugin loads up to `history_limit` recent messages by contact phone, scoped to

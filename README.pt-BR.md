@@ -191,6 +191,36 @@ de enviar. Ele reutiliza o upload enquanto o conteúdo for o mesmo. Limite: 16 M
 200 itens no catálogo, imagens JPEG/PNG/GIF/WebP e documentos PDF/Office/TXT/CSV; links simbólicos,
 hardlinks, arquivos ocultos, SVG e ZIP são recusados. URLs já cadastradas no SOUL continuam aceitas.
 
+### Orientações automáticas e descoberta de ferramentas (0.4.2)
+
+O plugin acrescenta um bloco estático de instruções pelo `MessageEvent.channel_prompt` nativo
+do Hermes em cada turno de atendimento Pipefacil. Esse contexto complementa o profile sem
+editar seu `SOUL.md` e vale também para a próxima mensagem de uma conversa existente após
+atualizar o plugin e reiniciar o gateway. Não contém texto do lead, arquivos, links ou segredos;
+esses dados continuam separados das instruções do canal.
+
+Para pedidos como “me manda a apresentação”, o agente recebe orientação para consultar
+`pipefacil_list_media`, escolher o arquivo adequado e enviar pelo `fileId` com
+`pipefacil_send_messages`. Uma pasta `knowledge/` vazia não comprova ausência de arquivos em
+`media/`. Catálogo indisponível não deve ser tratado como vazio, e arquivos ambíguos exigem
+uma pergunta curta. O operador ainda precisa cadastrar os materiais e regras comerciais no profile.
+
+Se o Hermes diferir ferramentas, o contexto orienta consultar `tool_describe` pelo nome exato
+e executar uma ferramenta por `tool_call`. Como alternativa, `tool_search` deve receber somente
+o nome exato, com underscores. A busca do Hermes é lexical: termos adicionais ausentes da
+descrição podem eliminar todos os resultados. As descrições dos cinco schemas agora incluem
+termos de mídia e CRM em português e inglês e são iguais às descrições do registro.
+
+Essa atualização orienta o modelo; não garante que todo pedido natural será interpretado
+corretamente. Para validar após implantação, cadastre uma apresentação sintética identificável,
+peça seu envio sem mencionar ferramentas ou IDs e confira o anexo realmente recebido. Repita
+o pedido e compare a chave do objeto no CRM para verificar o reaproveitamento. Em outra conversa
+de teste, confirme o comportamento com catálogo vazio. O aceite da API sozinho não comprova entrega.
+
+Atualize explicitamente o profile atendido com `hermes -p <profile> plugins update pipefacil-platform`
+(ou `plugins update pipefacil-platform` no Console desse profile) e reinicie seu gateway; em
+gateway compartilhado, reinicie o `default`. Não é necessário limpar histórico ou mudar o SOUL.
+
 Para atualizar negócios, configure `PIPEFACIL_MEMBER_USER_ID` com o **userId do responsável**
 do agente, `PIPEFACIL_CUSTOM_FIELDS` com slugs permitidos e `PIPEFACIL_STAGE_IDS` com IDs permitidos,
 separados por vírgula. `pipefacil_current_deal` mostra o negócio atual e suas permissões. O plugin
