@@ -8,18 +8,20 @@ sends the final answer through the Pipefacil API, and provides a narrowly scoped
 
 ## Features
 
-- Accepts Pipefacil `message.received` webhooks without signature verification; validates each message's original timestamp and rejects historical replays.
+- Verifies Pipefacil AI-agent HMAC-SHA256 signatures, including gzip payloads; rejects historical replays.
 - Loads recent conversation messages from every participant, not only messages sent by Hermes.
 - Replies to the lead through the Pipefacil API.
 - Registers `pipefacil_send_messages` to send up to two additional text, image, or document messages before Hermes sends its final answer automatically.
-- Downloads attachments only from current webhook messages and passes them to Hermes' native image/document handling.
+- Downloads current images/documents/audio and uses Hermes' native vision, document readers and transcription.
+- Lists approved profile-local `media/` assets, uploads them through the existing CRM API and resolves fresh temporary URLs before sending.
+- Durably queues admitted jobs, orders preparation/model execution per conversation and journals HTTP effects before attempting them.
 - Falls back to the local Hermes conversation context if Pipefacil history cannot be loaded.
 - Treats a standalone `/reset` message as a Hermes command, removes the finished local session transcript,
   and stops sending pre-reset Pipefacil history back to the model for that conversation.
 - Registers `pipefacil_update_deal` for updating an explicitly identified deal.
 - Reads API credentials from the owning Hermes profile; it does not accept a `workspaceId`.
 - Historical attachments are shown as non-text content and are not downloaded.
-- Outbound media links must be HTTPS and explicitly listed in the active profile's `SOUL.md`.
+- Local outbound files come from the profile's `media/` catalog. External links must be HTTPS and listed in that profile's `SOUL.md`.
 
 ## Requirements
 
@@ -47,6 +49,7 @@ in that profile's `.env`; never commit them:
 
 ```dotenv
 PIPEFACIL_API_KEY=pf_live_...
+PIPEFACIL_WEBHOOK_SECRET=original_ai_agent_secret
 ```
 
 Restart the gateway after changing plugin files, credentials, or profile configuration.
@@ -132,9 +135,8 @@ agent:
   max_turns: 50
 ```
 
-The wildcard allowlist permits any lead identity in an inbound webhook to reach the agent. This
-version does not authenticate webhook requests: anyone who can reach the callback can submit an event
-that triggers an agent response or a deal update. Restrict access at the ingress and use HTTPS.
+The wildcard allowlist permits lead identities from authenticated backend events. The backend selects
+eligible agent/conversation events; the adapter verifies their origin. Use HTTPS at the public ingress.
 
 ### Replay protection
 
@@ -144,7 +146,7 @@ more than 30 seconds in the future are ignored with HTTP 200. A recent delivery 
 an old message new. In mixed batches only recent messages are admitted. This also applies to `/reset`.
 
 Admission receipts are stored in `<profile>/pipefacil-state/inbox.sqlite3` for seven days, scoped by
-conversation and message identity, without storing the message body or phone number. Preserve the
+conversation and message identity. The private job queue also stores the webhook for recovery. Preserve the
 profile volume across deployments. Reconnects, restarts, and `/reset` preserve these receipts. Storage
 failure returns HTTP 503 before the agent runs. After admission, receipts survive processing errors
 because a send's outcome may be ambiguous; the same webhook is not automatically run again. A customer
@@ -152,7 +154,7 @@ can send a new message to continue the conversation.
 
 To change the five-minute window manually, edit the selected profile's YAML in the dashboard and set
 `platforms.pipefacil.extra.max_message_age_seconds`, then restart that profile's gateway. Valid values
-are 1–3600 seconds; zero does not disable the protection. Signature authentication remains disabled.
+are 1–3600 seconds; zero does not disable the protection. Signature authentication is mandatory.
 
 The `pipefacil` toolset contains response tools, an update tool bound to the current event's deal,
 and `pipefacil_read_profile_file`. The send tool uses the
@@ -205,9 +207,24 @@ in a clean Docker image tested, the shared callback used port `8642` even though
 for example `http://127.0.0.1:8642/p/<profile>/events/message-received/health`. Port `8645`
 applies to a standalone Pipefacil gateway.
 
-Hermes accepts `message.received` events without checking `X-Pipefacil-Signature-256` or
-`X-Pipefacil-Timestamp`. The endpoint acknowledges webhook admission; the model turn and outbound
+The adapter checks `X-PipeFacil-Signature-256` and `X-PipeFacil-Timestamp`, using the literal original
+secret and `timestamp + "." + original JSON bytes` before gzip. The endpoint acknowledges durable admission; the model turn and outbound
 API reply run in the background. A `200` response does not confirm the agent replied successfully.
+
+## Version 0.4 migration
+
+Set the original `PIPEFACIL_WEBHOOK_SECRET` for every served profile; do not prefix the secret with
+`sha256=` or decode it as hex/base64. That prefix belongs to the request signature header.
+Set `PIPEFACIL_MEMBER_USER_ID` to the agent's responsible **userId** to enable mutations;
+`PIPEFACIL_CUSTOM_FIELDS` and `PIPEFACIL_STAGE_IDS` are comma-separated allowed slugs/IDs.
+`pipefacil_current_deal` reads authorized live CRM facts before updates, which require readback confirmation.
+The adapter enforces the `pipefacil` toolset and blocks other tools at runtime.
+Put reference files in `knowledge/`; put outgoing images/documents in `media/` and select them through
+`pipefacil_list_media` and `fileId`. Symlinks/hardlinks/hidden files are excluded; uploads are limited to 16 MiB.
+Profile state now includes private queued webhook contents, with 0700 directories and 0600 files.
+Never-started jobs are recoverable; interrupted or ambiguous writes require operator reconciliation.
+See [HTTP architecture, limits, schemas and operations](docs/http-runtime.md) and
+[the Portuguese setup instructions](README.pt-BR.md). Native audio transcription requires a configured STT provider.
 
 ## Conversation context
 
@@ -227,7 +244,7 @@ the customer conversation. Observability records and other profiles' sessions ar
 
 ## Compatibility note
 
-Version 0.3.5 is tested with Hermes 0.21.5 (`749220ef`), including two secondary profiles in a shared
+Version 0.4 is checked against the official Hermes 0.21.5 image and current upstream source, including two secondary profiles in a shared
 gateway. Tool routing uses the gateway's live session index; each profile keeps its own transcripts.
 The plugin supports both the legacy and guarded session-deletion signatures.
 Trusted tool facts follow the actual background-processing callbacks. Each worker retains its own
@@ -252,12 +269,11 @@ text layer may not extract.
 ## Security and privacy
 
 - Keep `PIPEFACIL_API_KEY` in the profile's secret file, outside Git.
-- Protect the public callback at the ingress. This version cannot tell a Pipefacil request from a
-  forged one, and the event can cause outbound messages or CRM updates.
+- The public callback requires the correct AI-agent HMAC signature. Keep the signing secret private.
 - Use HTTPS between Pipefacil and the public ingress.
 - Lead messages and recent conversation history are sent to the configured Hermes model as turn
   context. Treat the model provider and profile access policy as part of your data-handling setup.
-- The plugin does not download historical attachments or transcribe audio.
+- The plugin does not download historical attachments. Current audio uses the configured native STT provider.
 - See [SECURITY.md](SECURITY.md) for responsible vulnerability reporting.
 
 ## License

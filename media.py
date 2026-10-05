@@ -8,6 +8,7 @@ import ipaddress
 import mimetypes
 import re
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,9 +16,23 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .network import PublicTransport
+
 
 MAX_INBOUND_MEDIA_BYTES = 25 * 1024 * 1024
 MEDIA_DOWNLOAD_TIMEOUT_SECONDS = 25.0
+INBOUND_CACHE_RETENTION_SECONDS = 24 * 3600
+_AUDIO_MIMES = {"audio/ogg", "audio/opus", "audio/mpeg", "audio/mp3", "audio/mp4", "audio/x-m4a",
+                "audio/aac", "audio/wav", "audio/x-wav", "audio/flac", "audio/webm"}
+
+
+def normalize_mime(value):
+    mime = str(value or "").split(";", 1)[0].strip().lower()
+    # Common object-storage aliases. Magic validation still requires the
+    # corresponding container: a real LATM stream cannot pass as an MP4 file.
+    return {"audio/x-flac": "audio/flac", "audio/x-wav": "audio/wav", "audio/mp3": "audio/mpeg",
+            "audio/m4a": "audio/mp4", "audio/x-m4a": "audio/mp4", "audio/mp4a-latm": "audio/mp4"}.get(mime, mime)
+
 _MEDIA_LIBRARY_LINE = re.compile(
     r"^\s*-\s*label:\s*(?P<label>[^|]+?)\s*\|\s*type:\s*"
     r"(?P<kind>image|document)\s*\|\s*url:\s*(?P<url>\S+)\s*$",
@@ -153,16 +168,18 @@ def _media_spec(message: dict[str, Any]) -> tuple[str, str, str, str] | InboundM
 
     download_url = media.get("downloadUrl") or media.get("download_url")
     filename = str(media.get("filename") or "").strip()
-    declared_mime = str(media.get("mimeType") or media.get("mime_type") or "").split(";", 1)[0].strip().lower()
+    declared_mime = normalize_mime(media.get("mimeType") or media.get("mime_type"))
     if not download_url:
         return InboundMediaResult(error="The current webhook media has no temporary download URL.")
     if not _safe_download_url(download_url):
         return InboundMediaResult(error="The current webhook media URL is invalid or not HTTPS.")
 
     if not declared_mime and filename:
-        declared_mime = mimetypes.guess_type(filename)[0] or ""
+        declared_mime = normalize_mime(mimetypes.guess_type(filename)[0])
     if declared_mime.startswith("image/") and declared_mime != "image/svg+xml":
         kind = "image"
+    elif declared_mime in _AUDIO_MIMES:
+        kind = "audio"
     elif declared_mime in _DOCUMENT_MIMES:
         kind = "document"
     elif message_kind in {"image", "photo"}:
@@ -184,14 +201,30 @@ def _clean_filename(value: str, mime_type: str) -> str:
 
 
 def _kind_for_mime(mime_type: str) -> str | None:
+    mime_type = normalize_mime(mime_type)
     if mime_type.startswith("image/") and mime_type != "image/svg+xml":
         return "image"
     if mime_type in _DOCUMENT_MIMES:
         return "document"
+    if mime_type in _AUDIO_MIMES:
+        return "audio"
     return None
 
 
 def _valid_file_prefix(content: bytes, mime_type: str) -> bool:
+    mime_type = normalize_mime(mime_type)
+    if mime_type in _AUDIO_MIMES:
+        if mime_type in {"audio/ogg", "audio/opus"}:
+            return content.startswith(b"OggS")
+        if mime_type in {"audio/wav", "audio/x-wav"}:
+            return content.startswith(b"RIFF") and content[8:12] == b"WAVE"
+        if mime_type == "audio/flac":
+            return content.startswith(b"fLaC")
+        if mime_type in {"audio/mp4", "audio/x-m4a"}:
+            return content[4:8] == b"ftyp"
+        if mime_type == "audio/webm":
+            return content.startswith(b"\x1a\x45\xdf\xa3")
+        return content.startswith(b"ID3") or (len(content) > 2 and content[0] == 255 and content[1] & 224 == 224)
     if mime_type == "application/pdf":
         return content.startswith(b"%PDF-")
     if mime_type.startswith("image/"):
@@ -222,6 +255,7 @@ def _download_to_profile_cache(
             timeout=MEDIA_DOWNLOAD_TIMEOUT_SECONDS,
             follow_redirects=False,
             trust_env=False,
+            transport=PublicTransport(),
         ) as client:
             with client.stream("GET", url, headers={"Accept": f"{kind}/*, application/octet-stream"}) as response:
                 if not 200 <= response.status_code < 300:
@@ -234,7 +268,7 @@ def _download_to_profile_cache(
                             return InboundMediaResult(error="media download exceeded the 25 MiB limit")
                     except ValueError:
                         return InboundMediaResult(error="media download returned an invalid content length")
-                response_mime = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+                response_mime = normalize_mime(response.headers.get("Content-Type", ""))
                 if response_mime in {"application/octet-stream", "binary/octet-stream", ""}:
                     mime_type = declared_mime
                 else:
@@ -242,7 +276,10 @@ def _download_to_profile_cache(
                 if _kind_for_mime(mime_type) != kind:
                     return InboundMediaResult(error="downloaded media MIME type does not match a supported attachment")
 
-                directory.mkdir(parents=True, exist_ok=True)
+                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                if directory.is_symlink():
+                    raise ValueError("invalid profile cache directory")
+                directory.chmod(0o700)
                 suffix = Path(_clean_filename(filename, mime_type)).suffix[:20]
                 with tempfile.NamedTemporaryFile(
                     mode="wb", prefix=f"{hashlib.sha256(message_key.encode()).hexdigest()[:16]}-",
@@ -290,3 +327,16 @@ async def download_inbound_media(
         profile_home=profile_home,
         message_key=message_key,
     )
+
+
+def clean_cache(profile_home, *, protected=(), now=None):
+    directory = Path(profile_home) / "cache" / "pipefacil" / "inbound"
+    if directory.is_symlink() or not directory.exists():
+        return
+    cutoff = (time.time() if now is None else now) - INBOUND_CACHE_RETENTION_SECONDS
+    protected = frozenset(protected)
+    for path in directory.iterdir():
+        if path.is_symlink() or not path.is_file() or str(path) in protected:
+            continue
+        if path.stat().st_mtime < cutoff:
+            path.unlink(missing_ok=True)

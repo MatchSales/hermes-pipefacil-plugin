@@ -8,11 +8,13 @@ uma ferramenta restrita para atualizar o negócio no CRM.
 
 ## O que ele faz
 
-- Aceita webhooks `message.received` sem validar a assinatura; verifica o horário original de cada mensagem para rejeitar eventos antigos.
+- Autentica webhooks `message.received` com HMAC-SHA256, inclusive quando o backend compacta o JSON com gzip; rejeita eventos antigos.
 - Busca mensagens recentes de todos os participantes da conversa, não apenas as enviadas pelo Hermes.
 - Envia a resposta final do agente ao lead pela API do Pipefacil.
 - Registra `pipefacil_send_messages`, que permite enviar até duas mensagens adicionais (texto, imagem ou documento) antes da resposta final automática do Hermes.
-- Baixa somente anexos das mensagens atuais do webhook e os encaminha ao processamento nativo de imagem/documento do Hermes.
+- Baixa somente anexos atuais e usa visão, leitura de documentos e transcrição de áudio nativas do Hermes.
+- Oferece catálogo de imagens/documentos em `media/` no próprio profile, com upload na API existente do Pipefacil e links temporários.
+- Persiste a fila e as tentativas de envio antes de confirmar a admissão; ordena toda a execução por conversa.
 - Se não conseguir carregar o histórico do Pipefacil, usa o histórico local do Hermes que estiver
   disponível para aquela conversa.
 - Trata uma mensagem isolada `/reset` como comando do Hermes, remove o transcript local da sessão
@@ -20,7 +22,7 @@ uma ferramenta restrita para atualizar o negócio no CRM.
 - Registra a ferramenta `pipefacil_update_deal` para atualizar um negócio identificado pelo `seq`.
 - Lê as credenciais do profile atendido e não envia `workspaceId`.
 - Mídias recebidas de mensagens antigas do histórico aparecem como conteúdo não textual e não são baixadas.
-- Links de mídia enviados precisam ser HTTPS e estar explicitamente cadastrados no `SOUL.md` do profile ativo.
+- Arquivos locais enviados vêm de `media/` do profile. Links externos precisam ser HTTPS e estar cadastrados no `SOUL.md` desse profile.
 
 ## Requisitos
 
@@ -49,6 +51,7 @@ credenciais no arquivo `.env` do profile; não as adicione ao Git:
 
 ```dotenv
 PIPEFACIL_API_KEY=pf_live_...
+PIPEFACIL_WEBHOOK_SECRET=segredo_original_do_agente_no_pipefacil
 ```
 
 Reinicie o gateway após alterar arquivos do plugin, credenciais ou configuração do profile.
@@ -134,10 +137,10 @@ agent:
   max_turns: 50
 ```
 
-A allowlist `*` permite que qualquer identidade de lead recebida por webhook chegue ao agente. Esta
-versão não autentica o webhook: qualquer pessoa que alcançar o callback pode enviar um evento que
-dispare uma resposta do agente ou uma atualização no CRM. Restrinja o acesso na entrada pública e
-use HTTPS.
+A allowlist `*` permite que leads de eventos autenticados cheguem ao agente. O backend já seleciona
+os eventos conforme as regras do agente; o plugin verifica a assinatura para comprovar essa origem.
+Use HTTPS na entrada pública. As ferramentas disponíveis no atendimento são restritas pelo adapter
+e por um hook em tempo de execução, mesmo que outros toolsets estejam habilitados no YAML.
 
 ### Proteção contra reenvios
 
@@ -147,17 +150,52 @@ ou milissegundos. Por padrão, mensagens com mais de cinco minutos, sem horário
 uma mensagem antiga em nova. Em lotes mistos, apenas as mensagens recentes entram. Isso vale também
 para `/reset`.
 
-O registro de mensagens admitidas fica em `<profile>/pipefacil-state/inbox.sqlite3` por sete dias,
-separado por conversa e identidade da mensagem, sem guardar texto ou telefone. Preserve o volume do
-profile nas atualizações. Reinícios, reconexões e `/reset` mantêm esse registro. Falha ao salvar o
-registro retorna HTTP 503 antes de chamar o agente. Após a admissão, erros de processamento não
-liberam o mesmo evento para repetir o envio, pois o resultado de um envio pode ser incerto. O cliente
-pode mandar uma mensagem nova para continuar.
+O registro, a fila privada e o diário de efeitos ficam em `<profile>/pipefacil-state/inbox.sqlite3`,
+com diretório 0700 e arquivo 0600. A fila guarda o webhook para recuperar trabalhos ainda não iniciados.
+Os dados de trabalhos encerrados são removidos após sete dias; efeitos incertos mantêm referências
+de auditoria. Preserve o volume nas atualizações. Reinícios e `/reset` mantêm a deduplicação.
+Falha ao salvar retorna HTTP 503; fila cheia retorna 429, sem admitir as mensagens. Trabalhos iniciados
+antes de uma queda ficam interrompidos e não são executados novamente automaticamente. O cliente pode
+mandar uma mensagem nova para continuar. Veja [operação e reconciliação](docs/http-runtime.md).
 
 Para alterar a janela manualmente, edite o YAML do profile selecionado no dashboard, ajuste
 `platforms.pipefacil.extra.max_message_age_seconds` e reinicie o gateway desse profile. O intervalo
-permitido é de 1 a 3600 segundos; zero não desativa a proteção. A autenticação por assinatura continua
-desativada.
+permitido é de 1 a 3600 segundos; zero não desativa a proteção. A janela da assinatura é de cinco minutos.
+
+### Segredo e erros 401
+
+`PIPEFACIL_WEBHOOK_SECRET` recebe o **segredo original** do agente, literalmente, sem `sha256=`.
+Não converta hexadecimal para bytes e não use a assinatura de uma entrega como segredo.
+O `=` de `.env` separa o nome da variável do valor; não faz parte do segredo, salvo se o próprio
+segredo tiver esse caractere. O backend envia `sha256=<HMAC>` no cabeçalho da requisição.
+Ele calcula HMAC sobre `timestamp + "." + JSON original` **antes** de compactar. O plugin verifica
+os mesmos bytes descompactados, sem reserializar JSON. `PIPEFACIL_WEBHOOK_SECRET_NEXT` permite rotação.
+Um 401 no webhook indica assinatura/horário incorretos. Um 401 na API de saída indica chave da API
+incorreta; são credenciais diferentes. Veja [contrato HTTP e diagnóstico](docs/http-runtime.md).
+
+### Arquivos no próprio profile
+
+Coloque referências para consulta em `knowledge/` e imagens/documentos para envio em `media/`:
+
+```text
+<profile>/
+  SOUL.md
+  knowledge/guia-comercial.pdf
+  media/catalogo.pdf
+  media/fotos/equipe.jpg
+```
+
+O modelo chama `pipefacil_list_media`, escolhe um `fileId` e usa `pipefacil_send_messages`.
+O plugin valida o arquivo, faz upload pela API pública existente e renova o link temporário antes
+de enviar. Ele reutiliza o upload enquanto o conteúdo for o mesmo. Limite: 16 MiB por arquivo,
+200 itens no catálogo, imagens JPEG/PNG/GIF/WebP e documentos PDF/Office/TXT/CSV; links simbólicos,
+hardlinks, arquivos ocultos, SVG e ZIP são recusados. URLs já cadastradas no SOUL continuam aceitas.
+
+Para atualizar negócios, configure `PIPEFACIL_MEMBER_USER_ID` com o **userId do responsável**
+do agente, `PIPEFACIL_CUSTOM_FIELDS` com slugs permitidos e `PIPEFACIL_STAGE_IDS` com IDs permitidos,
+separados por vírgula. `pipefacil_current_deal` mostra o negócio atual e suas permissões. O plugin
+consulta contato/responsável antes da alteração e confirma os valores em uma nova consulta depois.
+Sem o userId configurado, conversas continuam disponíveis e alterações de negócio ficam desabilitadas.
 
 O toolset `pipefacil` contém as ferramentas de resposta, atualização do negócio do evento atual e
 `pipefacil_read_profile_file`. O envio de mensagens
@@ -226,7 +264,7 @@ agente, não apaga a conversa do Pipefacil.
 
 ## Compatibilidade
 
-A versão 0.3.5 foi testada com Hermes 0.21.5 (`749220ef`) e dois profiles em gateway compartilhado.
+A versão 0.4 é verificada com a imagem oficial Hermes 0.21.5 e o código upstream atual, incluindo dois profiles em gateway compartilhado.
 O plugin bloqueia avisos internos de configuração, interrupção, fila, onboarding e erros, inclusive
 em versões que chamam `send()` diretamente. Respostas automáticas exigem o turno atual do cliente;
 reenvios de recuperação fora desse turno são suprimidos. As confirmações explícitas de `/reset`
@@ -244,12 +282,11 @@ PDFs digitalizados sem camada de texto podem não ser extraídos.
 ## Segurança e privacidade
 
 - Mantenha `PIPEFACIL_API_KEY` no arquivo de segredos do profile, fora do Git.
-- Proteja o callback público na entrada: esta versão não distingue um pedido do Pipefacil de um
-  pedido forjado, que pode gerar mensagens ou atualizações no CRM.
+- O callback público exige a assinatura HMAC do agente. Preserve o segredo original em cada profile.
 - Use HTTPS entre o Pipefacil e a entrada pública.
 - As mensagens do lead e o histórico recente são enviados ao modelo configurado no Hermes como
   contexto do turno. Considere o provedor do modelo e o acesso ao profile na sua política de dados.
-- O plugin não baixa anexos do histórico antigo nem transcreve áudio.
+- O plugin não baixa anexos do histórico antigo. Áudios atuais usam o provedor de transcrição nativo configurado no Hermes.
 - Consulte [SECURITY.md](SECURITY.md) para reportar vulnerabilidades com responsabilidade.
 
 ## Licença

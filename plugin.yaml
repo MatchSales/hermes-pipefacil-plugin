@@ -1,17 +1,24 @@
 name: pipefacil-platform
 label: Pipefacil
 kind: platform
-version: 0.3.5
+version: 0.4.0
 description: Receives Pipefacil webhooks with current media, replies with text or allowlisted media, and updates deals.
 author: Hermes Pipefacil plugin contributors
 provides_tools:
   - pipefacil_update_deal
   - pipefacil_read_profile_file
   - pipefacil_send_messages
+  - pipefacil_list_media
+  - pipefacil_current_deal
 provides_hooks:
   - on_session_finalize
+  - pre_tool_call
 requires_env:
   - name: PIPEFACIL_API_KEY
     description: Pipefacil public API key for this Hermes profile
     prompt: Pipefacil API key
+    password: true
+  - name: PIPEFACIL_WEBHOOK_SECRET
+    description: Original AI-agent signing secret; literal value without sha256= prefix
+    prompt: Pipefacil webhook secret
     password: true

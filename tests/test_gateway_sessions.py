@@ -120,7 +120,10 @@ def test_all_three_tools_use_the_current_profile_route(multiplex, monkeypatch):
         return {"message_id": "accepted-test"}
 
     monkeypatch.setattr(m.adapters["sdr-a"], "send_api_message", send)
-    monkeypatch.setattr(m.tools, "update_deal", lambda **kwargs: updates.append(kwargs))
+    def update(context, key, properties, active):
+        updates.append({"seq": context["deal_seq"], "properties": properties})
+        return {"success": True}
+    m.adapters["sdr-a"].crm = SimpleNamespace(update=update)
     token = set_hermes_home_override(str(home))
     ctx = set_current_observability_context(turn_id="gateway-regression", session_id=m.entries["sdr-a"].session_id)
     active = m.turn("sdr-a")
@@ -398,6 +401,7 @@ def test_connection_checks_receipt_storage_before_opening_webhook(multiplex, mon
     m = multiplex
     adapter = m.module.PipefacilAdapter(PlatformConfig(enabled=True, extra={}))
     adapter.api_key = "test-key"
+    adapter.webhook_secret = "test-secret"
     monkeypatch.setattr(adapter, "_acquire_platform_lock", lambda *args: True)
     monkeypatch.setattr(adapter, "_release_platform_lock", lambda: None)
     bound = []
@@ -411,7 +415,7 @@ def test_connection_checks_receipt_storage_before_opening_webhook(multiplex, mon
     if storage_error:
         def fail(*args, **kwargs):
             raise sqlite3.OperationalError("read-only profile")
-        monkeypatch.setattr(m.module, "claim_messages", fail)
+        monkeypatch.setattr(adapter.state, "recover", fail)
     assert asyncio.run(adapter.connect()) is (not storage_error)
     assert bound == ([] if storage_error else [True])
 
