@@ -45,7 +45,8 @@ def _tools_module(monkeypatch, profile_home: Path, *, deal_seq=42, media_paths=f
     adapter_module.adapter_for_profile = lambda home, chat: SimpleNamespace(
         trusted_turn_context=lambda current_chat: {
             "deal_seq": deal_seq, "media_paths": media_paths,
-        }
+        }, crm=SimpleNamespace(update=lambda context, key, properties, active: {
+            "success": True, "seq": context["deal_seq"], "properties": properties})
     )
     monkeypatch.setitem(sys.modules, f"{package_name}.adapter", adapter_module)
     module = __import__(f"{package_name}.tools", fromlist=["*"])
@@ -55,8 +56,6 @@ def _tools_module(monkeypatch, profile_home: Path, *, deal_seq=42, media_paths=f
 
 def test_update_uses_current_deal_seq_not_model_supplied_value(tmp_path, monkeypatch):
     module = _tools_module(monkeypatch, tmp_path, deal_seq=42)
-    calls = []
-    monkeypatch.setattr(module, "update_deal", lambda **kwargs: calls.append(kwargs))
     monkeypatch.setattr(module, "_api_base_url", lambda: "https://example.test")
 
     result = asyncio.run(module._update_deal(
@@ -65,7 +64,7 @@ def test_update_uses_current_deal_seq_not_model_supplied_value(tmp_path, monkeyp
 
     assert result["success"] is True
     assert result["seq"] == 42
-    assert calls[0]["seq"] == 42
+    assert result["properties"] == {"notes": "confirmed"}
 
 
 def test_update_refuses_when_current_event_has_no_deal(tmp_path, monkeypatch):

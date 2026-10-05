@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import gzip
 import glob
 import hashlib
-import io
 import inspect
 import json
 import logging
@@ -34,9 +32,15 @@ from .api import (
     fetch_conversation_history,
     normalize_api_base_url,
     send_message,
+    upload_media,
+    media_url,
 )
-from .media import InboundMediaResult, download_inbound_media
-from .inbox import DEFAULT_MAX_MESSAGE_AGE_SECONDS, claim_messages, fresh_messages
+from .media import InboundMediaResult, download_inbound_media, clean_cache
+from .inbox import DEFAULT_MAX_MESSAGE_AGE_SECONDS, fresh_messages
+from .security import AdmissionError, decode_body, verify, parse_json, ADMIN, ADMIN_REPLY, public_text
+from .state import State, StateError, Full, Conflict, digest
+from .library import read_asset
+from .crm import CRM
 from .reset import (
     _history_after_reset,
     _messages_after_reset,
@@ -57,6 +61,7 @@ _ADAPTERS_LOCK = threading.RLock()
 _PRELIMINARY_SENDS_LOCK = threading.Lock()
 _ADAPTERS_BY_PROFILE: dict[str, "PipefacilAdapter"] = {}
 _ACTIVE_PIPEFACIL_TURN: ContextVar[Any] = ContextVar("active_pipefacil_turn", default=None)
+_INGRESS_JOB: ContextVar[Any] = ContextVar("pipefacil_ingress_job", default=None)
 _PRELIMINARY_SEND_COUNTS: dict[tuple[str, str], tuple[int, float]] = {}
 _CONTROL_REPLY = object()
 
@@ -125,6 +130,8 @@ def _message_line_with_media(
         return line
     if result.path:
         detail = f"Anexo atual recebido: {result.filename} ({result.mime_type}); arquivo anexado a este turno."
+        if not result.mime_type.startswith(("image/", "audio/")):
+            detail += f" Leia o conteúdo com pipefacil_read_profile_file, path={result.path}, antes de responder sobre ele."
     else:
         detail = (
             "Falha ao baixar ou validar o anexo atual: "
@@ -134,20 +141,23 @@ def _message_line_with_media(
 
 
 def _decode_body(raw_body: bytes, content_encoding: str) -> bytes:
-    encoding = content_encoding.strip().lower()
-    if not encoding or encoding == "identity":
-        decoded = raw_body
-    elif encoding == "gzip":
-        try:
-            with gzip.GzipFile(fileobj=io.BytesIO(raw_body)) as stream:
-                decoded = stream.read(MAX_DECOMPRESSED_BODY_BYTES + 1)
-        except (OSError, EOFError) as exc:
-            raise ValueError("Invalid gzip body") from exc
-    else:
-        raise NotImplementedError("Unsupported Content-Encoding")
-    if len(decoded) > MAX_DECOMPRESSED_BODY_BYTES:
-        raise OverflowError("Decompressed webhook payload is too large")
-    return decoded
+    return decode_body(raw_body, content_encoding)
+
+
+def _list_setting(extra, name, env, default=()):
+    value = get_scoped_secret(env, "") or extra.get(name, default)
+    if isinstance(value, str):
+        value = value.split(",")
+    if not isinstance(value, (list, tuple)) or any(not isinstance(v, str) for v in value):
+        raise ValueError("Invalid Pipefacil " + name)
+    return frozenset(v.strip() for v in value if v.strip())
+
+
+def _integer_setting(extra, name, env, default, minimum, maximum):
+    value = int(get_scoped_secret(env, "") or extra.get(name, default))
+    if not minimum <= value <= maximum:
+        raise ValueError("Invalid Pipefacil " + name)
+    return value
 
 
 def _safe_path(value: Any) -> str:
@@ -169,6 +179,13 @@ def _safe_path(value: Any) -> str:
 class PipefacilAdapter(BasePlatformAdapter):
     """HTTP inbound adapter; its API key is read in the owning profile scope."""
 
+    @property
+    def authorization_is_upstream(self) -> bool:
+        # Every event enters through mandatory profile-specific HMAC verification.
+        # Pipefacil has already selected this agent/contact before signing the
+        # webhook; customers do not pair with the Hermes operator gateway.
+        return True
+
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform("pipefacil"))
         extra = config.extra or {}
@@ -176,10 +193,12 @@ class PipefacilAdapter(BasePlatformAdapter):
         extra.setdefault("notice_delivery", "private")
         config.extra = extra
         self.api_key = get_scoped_secret("PIPEFACIL_API_KEY", "") or ""
-        self.api_base_url = normalize_api_base_url(extra.get("api_base_url", DEFAULT_API_BASE_URL))
-        self.host = extra.get("host", "127.0.0.1") or "127.0.0.1"
-        self.port = int(extra.get("port", DEFAULT_PORT))
-        self.webhook_path = _safe_path(extra.get("path", DEFAULT_PATH))
+        self.webhook_secret = get_scoped_secret("PIPEFACIL_WEBHOOK_SECRET", "") or ""
+        self.webhook_secret_next = get_scoped_secret("PIPEFACIL_WEBHOOK_SECRET_NEXT", "") or ""
+        self.api_base_url = normalize_api_base_url(get_scoped_secret("PIPEFACIL_API_BASE_URL", "") or extra.get("api_base_url", DEFAULT_API_BASE_URL))
+        self.host = get_scoped_secret("PIPEFACIL_HOST", "") or extra.get("host", "127.0.0.1") or "127.0.0.1"
+        self.port = _integer_setting(extra, "port", "PIPEFACIL_PORT", DEFAULT_PORT, 1, 65535)
+        self.webhook_path = _safe_path(get_scoped_secret("PIPEFACIL_WEBHOOK_PATH", "") or extra.get("path", DEFAULT_PATH))
         self.history_limit = max(1, min(int(extra.get("history_limit", DEFAULT_HISTORY_LIMIT)), 200))
         self.max_message_age_seconds = int(extra.get("max_message_age_seconds", DEFAULT_MAX_MESSAGE_AGE_SECONDS))
         if not 1 <= self.max_message_age_seconds <= 3600:
@@ -192,8 +211,6 @@ class PipefacilAdapter(BasePlatformAdapter):
         self.reset_allowed_users.discard("")
         from hermes_constants import get_hermes_home
         self.profile_home = Path(get_hermes_home()).resolve()
-        with _ADAPTERS_LOCK:
-            _ADAPTERS_BY_PROFILE[str(self.profile_home)] = self
         self._app = None
         self._runner = None
         self._inbound_tasks: set[asyncio.Task] = set()
@@ -206,30 +223,59 @@ class PipefacilAdapter(BasePlatformAdapter):
         self._reset_purge_results: dict[str, bool] = {}
         self._turn_context_lock = threading.RLock()
         self._active_turn_context: dict[str, list[dict[str, Any]]] = {}
+        capacity = _integer_setting(extra, "queue_capacity", "PIPEFACIL_QUEUE_CAPACITY", 500, 1, 10000)
+        per_chat = _integer_setting(extra, "queue_per_chat", "PIPEFACIL_QUEUE_PER_CHAT", 50, 1, capacity)
+        concurrency = _integer_setting(extra, "concurrency", "PIPEFACIL_CONCURRENCY", 4, 1, 64)
+        self.turn_timeout = _integer_setting(extra, "turn_timeout_seconds", "PIPEFACIL_TURN_TIMEOUT_SECONDS", 600, 10, 3600)
+        self.channel_ids = _list_setting(extra, "channel_ids", "PIPEFACIL_CHANNEL_IDS")
+        self.state = State(self.profile_home, capacity=capacity, per_chat=per_chat)
+        self._workers = {}
+        self._slots = asyncio.Semaphore(concurrency)
+        self._effect_lock = threading.RLock()
+        self._closing = True
+        self._ready_error = None
+        self._counts = {"authenticated": 0, "rejected": 0, "duplicate": 0, "admitted": 0}
+        self._last_maintenance = 0
+        fields = _list_setting(extra, "writable_fields", "PIPEFACIL_WRITABLE_FIELDS", ("notes", "customFields", "stageId", "lostReason"))
+        supported = {"name", "value", "currency", "closeProbability", "expectedCloseAt", "stageId", "lostReason", "notes", "tagIds", "customFields", "contact"}
+        if fields - supported:
+            raise ValueError("Unsupported Pipefacil writable_fields")
+        self.crm = CRM(self, member_user_id=get_scoped_secret("PIPEFACIL_MEMBER_USER_ID", "") or extra.get("member_user_id", ""),
+                       fields=fields, custom_fields=_list_setting(extra, "custom_fields", "PIPEFACIL_CUSTOM_FIELDS"),
+                       stages=_list_setting(extra, "stage_ids", "PIPEFACIL_STAGE_IDS"))
+        with _ADAPTERS_LOCK:
+            _ADAPTERS_BY_PROFILE[str(self.profile_home)] = self
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         if not self.api_key.strip():
             return self._fail("config_missing", "Set PIPEFACIL_API_KEY in this profile's .env")
+        if not self.webhook_secret:
+            return self._fail("webhook_secret_missing", "Set the original PIPEFACIL_WEBHOOK_SECRET in this profile's .env")
         if not (1 <= self.port <= 65535):
             return self._fail("config_invalid", "Pipefacil webhook port must be between 1 and 65535")
         try:
             # Validate writable receipt storage before advertising a connected channel,
             # instead of discovering a profile-volume permission error on the first lead.
-            await asyncio.to_thread(claim_messages, self.profile_home, "", [], now=time.time())
-        except (OSError, sqlite3.Error):
+            self.state.acquire()
+            pending_chats = await asyncio.to_thread(self.state.recover)
+            await asyncio.to_thread(clean_cache, self.profile_home)
+        except (OSError, sqlite3.Error, StateError):
+            self.state.close()
             logger.exception("[pipefacil] Inbound receipt storage is unavailable")
             return self._fail("storage_unavailable", "Pipefacil inbound receipt storage must be writable in this profile")
         key_fingerprint = hashlib.sha256(self.api_key.encode()).hexdigest()[:16]
         if not self._acquire_platform_lock("pipefacil", key_fingerprint, "Pipefacil API key"):
+            self.state.close()
             return False
 
         try:
             from aiohttp import web
         except ImportError:
             self._release_platform_lock()
+            self.state.close()
             return self._fail("missing_dep", "aiohttp is required by the Pipefacil webhook adapter")
 
-        self._app = web.Application(client_max_size=MAX_COMPRESSED_BODY_BYTES)
+        self._app = web.Application(client_max_size=MAX_DECOMPRESSED_BODY_BYTES, handler_args={"auto_decompress": False})
         self._app.router.add_get(f"{self.webhook_path}/health", self._handle_health)
         self._app.router.add_post(self.webhook_path, self._handle_webhook)
         self._wire_plugin_handlers(self._app)
@@ -254,14 +300,19 @@ class PipefacilAdapter(BasePlatformAdapter):
         except OSError as exc:
             self._app = None
             self._release_platform_lock()
+            self.state.close()
             return self._fail("bind_failed", f"Could not bind Pipefacil webhook on {self.host}:{self.port}: {exc}")
 
         self._mark_connected()
+        self._closing = False
+        for chat in pending_chats:
+            self._schedule(chat)
         if self._runner is not None:
             logger.info("[pipefacil] Listening on %s:%s%s", self.host, self.port, self.webhook_path)
         return True
 
     async def disconnect(self) -> None:
+        self._closing = True
         self._mark_disconnected()
         tasks = list(self._inbound_tasks)
         for task in tasks:
@@ -281,52 +332,125 @@ class PipefacilAdapter(BasePlatformAdapter):
             if _ADAPTERS_BY_PROFILE.get(str(self.profile_home)) is self:
                 _ADAPTERS_BY_PROFILE.pop(str(self.profile_home), None)
         self._release_platform_lock()
+        self.state.close()
+
+    def effect(self, job, kind, arguments, operation, *, active):
+        """Serialize effects and commit intent before HTTP. An ambiguous result is never retried."""
+        with self._effect_lock:
+            if not active() or self._closing or self._ready_error:
+                raise PipefacilAPIError("The Pipefacil turn is no longer active.")
+            try:
+                identity, saved = self.state.claim_action(job, kind, arguments)
+            except StateError as exc:
+                raise PipefacilAPIError(str(exc)) from None
+            if saved is not None:
+                return saved
+            try:
+                if not active():
+                    raise PipefacilAPIError("The Pipefacil turn is no longer active.")
+                result = operation()
+                self.state.finish_action(identity, result)
+                return result
+            except BaseException as exc:
+                rejected = isinstance(exc, PipefacilAPIError) and (exc.definite_rejection or exc.status_code is not None and 400 <= exc.status_code < 500)
+                self.state.finish_action(identity, rejected=rejected)
+                raise
 
     async def send_api_message(self, chat_id: str, message: dict[str, Any]) -> dict[str, Any]:
-        """Send a text/image/document to a destination from the current webhook."""
-        destination = self._destinations.get(str(chat_id))
-        if not destination:
+        context = self._live_turn_context(chat_id)
+        ingress = _INGRESS_JOB.get()
+        if context is not None:
+            destination = dict(context["destination"])
+            job = context["job_id"]
+            def active():
+                return self._live_turn_context(chat_id) is context
+        elif ingress is not None and ingress[0] is self:
+            # Only the private reset/admin response path runs before the native turn.
+            destination = dict(self._destinations.get(str(chat_id), {}))
+            job = ingress[1]
+            def active():
+                return _INGRESS_JOB.get() == ingress
+        else:
+            raise PipefacilAPIError("No active Pipefacil webhook turn for this conversation.")
+        if not destination.get("phone"):
             raise PipefacilAPIError("No active Pipefacil webhook destination for this conversation.")
-        message_type = str(message.get("type") or "")
-        if message_type == "text":
-            text = message.get("text")
-            if not isinstance(text, str) or not text.strip():
-                raise PipefacilAPIError("Refusing to send an empty Pipefacil text message.")
-        elif message_type in {"image", "document"}:
-            text = None
-            if not isinstance(message.get("mediaLink"), str):
-                raise PipefacilAPIError("Pipefacil media message is missing its approved mediaLink.")
+        message = dict(message)
+        with self._runtime_scope():
+            key = get_scoped_secret("PIPEFACIL_API_KEY", "") or ""
+            secrets = (key, self.webhook_secret, self.webhook_secret_next, get_scoped_secret("OPENAI_API_KEY", ""))
+        if message.get("type") == "text":
+            message["text"] = public_text(message.get("text"), secrets)
+            if len(message["text"]) > 4000:
+                raise PipefacilAPIError("Text message exceeds 4000 characters.")
+        elif message.get("type") in {"image", "document"}:
+            if not message.get("mediaLink") and not message.get("fileId"):
+                raise PipefacilAPIError("Media requires an approved library entry.")
+            if message.get("caption"):
+                message["caption"] = public_text(message["caption"], secrets)
         else:
             raise PipefacilAPIError("Unsupported Pipefacil message type.")
 
-        with self._runtime_scope():
-            key = get_scoped_secret("PIPEFACIL_API_KEY", "") or ""
-            envelope = await asyncio.to_thread(
-                send_message,
-                api_key=key,
-                base_url=self.api_base_url,
-                recipient=destination["phone"],
-                message_type=message_type,
-                text=text,
-                media_link=message.get("mediaLink"),
-                caption=message.get("caption"),
-                filename=message.get("filename"),
-                mime_type=message.get("mimeType"),
-                channel_id=destination.get("channel_id") or None,
-                sender_phone_number_id=destination.get("phone_number_id") or None,
-            )
-        data = envelope.get("data") if isinstance(envelope.get("data"), dict) else envelope
-        message_data = data.get("message") if isinstance(data.get("message"), dict) else data
-        if data.get("success") is False or message_data.get("success") is False:
-            raise PipefacilAPIError("Pipefacil did not accept the message.")
-        status = str(message_data.get("status") or data.get("status") or "").strip().lower()
-        if status in {"failed", "failure", "error", "rejected", "undeliverable"}:
-            raise PipefacilAPIError("Pipefacil did not accept the message for delivery.")
-        message_id = message_data.get("id") or data.get("id")
-        return {
-            "message_id": str(message_id) if message_id else None,
-            "status": status or "accepted",
-        }
+        def deliver():
+            asset_data = None
+            if message.get("fileId"):
+                try:
+                    asset_data = read_asset(self.profile_home, message["fileId"], message["type"])
+                except (OSError, ValueError):
+                    raise PipefacilAPIError("The approved profile file is unavailable or invalid.", definite_rejection=True) from None
+            if context is not None and context.get("deal_seq") and self.crm.member_user_id:
+                self.crm.authorized(context, key)
+            arguments = {**message, "destination": destination}
+            if asset_data:
+                arguments["contentDigest"] = asset_data[2]
+
+            def write():
+                try:
+                    media_link = message.get("mediaLink")
+                    filename, mime = message.get("filename"), message.get("mimeType")
+                    if asset_data:
+                        asset, body, content_hash = asset_data
+                        cache_key = digest([str(self.profile_home), self.api_base_url, hashlib.sha256(key.encode()).hexdigest(), content_hash])
+                        receipt = self.state.upload(cache_key)
+                        if receipt is None:
+                            receipt = self.effect(job, "upload", {"cache": cache_key}, lambda: upload_media(
+                                api_key=key, base_url=self.api_base_url, filename=asset.filename, mime_type=asset.mime, body=body), active=active)
+                            self.state.upload(cache_key, receipt)
+                        media_link = media_url(api_key=key, base_url=self.api_base_url, storage_key=receipt["key"])
+                        filename, mime = asset.filename, asset.mime
+                    if not active() or self._closing:
+                        raise PipefacilAPIError("The Pipefacil turn is no longer active.")
+                    # Revalidate after upload/URL resolution so a reassigned lead cannot
+                    # receive a new agent message based on the earlier ownership check.
+                    if context is not None and context.get("deal_seq") and self.crm.member_user_id:
+                        self.crm.authorized(context, key)
+                except (PipefacilAPIError, OSError, ValueError) as exc:
+                    # No message POST has happened. Keep an uncertain upload in its
+                    # own journal, but allow a truthful text reply about the failure.
+                    raise PipefacilAPIError(str(exc), definite_rejection=True) from None
+                envelope = send_message(api_key=key, base_url=self.api_base_url, recipient=destination["phone"],
+                    message_type=message["type"], text=message.get("text"), media_link=media_link,
+                    caption=message.get("caption"), filename=filename, mime_type=mime,
+                    channel_id=destination.get("channel_id") or None,
+                    sender_phone_number_id=destination.get("phone_number_id") or None)
+                data = envelope.get("data")
+                if not isinstance(data, dict):
+                    raise PipefacilAPIError("Pipefacil returned an invalid send receipt.")
+                message_data = data.get("message") if isinstance(data.get("message"), dict) else data
+                status = str(message_data.get("status") or data.get("status") or "").lower()
+                identity = message_data.get("id") or data.get("id")
+                if (data.get("success") is False or message_data.get("success") is False
+                        or status in {"failed", "failure", "error", "rejected", "undeliverable"}):
+                    raise PipefacilAPIError("Pipefacil explicitly rejected this message.", definite_rejection=True)
+                if not identity:
+                    raise PipefacilAPIError("Pipefacil did not return a valid accepted message receipt.")
+                return {"message_id": str(identity), "status": status or "accepted"}
+
+            return self.effect(job, "send", arguments, write, active=active)
+
+        try:
+            return await asyncio.to_thread(deliver)
+        except (ValueError, StateError) as exc:
+            raise PipefacilAPIError(str(exc)) from None
 
     async def send(
         self,
@@ -366,8 +490,14 @@ class PipefacilAdapter(BasePlatformAdapter):
 
     async def _handle_health(self, request):
         from aiohttp import web
-        return web.json_response({"status": "ok", "platform": "pipefacil",
-                                  "max_message_age_seconds": self.max_message_age_seconds})
+        try:
+            state = await asyncio.to_thread(self.state.status)
+            ready = not self._closing and self._ready_error is None and bool(self.webhook_secret) and callable(self._message_handler)
+            return web.json_response({"status": "ready" if ready else "not_ready", "platform": "pipefacil",
+                                      "error": self._ready_error, "counters": self._counts,
+                                      "workers": len(self._workers), **state}, status=200 if ready else 503)
+        except (OSError, sqlite3.Error, StateError):
+            return web.json_response({"status": "not_ready", "error": "state_unavailable"}, status=503)
 
     def _runtime_scope(self):
         from gateway.run import _profile_runtime_scope
@@ -376,24 +506,21 @@ class PipefacilAdapter(BasePlatformAdapter):
     async def _handle_webhook(self, request):
         from aiohttp import web
         with self._runtime_scope():
+            if self._closing or self._ready_error:
+                return web.json_response({"error": "gateway_not_ready"}, status=503)
             if request.content_length is not None and request.content_length > MAX_COMPRESSED_BODY_BYTES:
                 return web.json_response({"error": "payload too large"}, status=413)
             try:
                 raw_body = await request.read()
-                if len(raw_body) > MAX_COMPRESSED_BODY_BYTES:
-                    return web.json_response({"error": "payload too large"}, status=413)
                 body = _decode_body(raw_body, request.headers.get("Content-Encoding", ""))
-            except OverflowError:
-                return web.json_response({"error": "payload too large"}, status=413)
-            except NotImplementedError:
-                return web.json_response({"error": "unsupported content encoding"}, status=415)
-            except (ValueError, OSError):
-                return web.json_response({"error": "invalid request body"}, status=400)
-
-            try:
-                payload = json.loads(body)
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                return web.json_response({"error": "invalid JSON"}, status=400)
+                verify(body, request.headers, (self.webhook_secret, self.webhook_secret_next))
+                self._counts["authenticated"] += 1
+                payload = parse_json(body)
+            except AdmissionError as exc:
+                self._counts["rejected"] += 1
+                return web.json_response({"error": str(exc)}, status=exc.status)
+            except OSError:
+                return web.json_response({"error": "invalid_request_body"}, status=400)
             if not isinstance(payload, dict) or payload.get("type") != "message.received":
                 return web.json_response({"status": "ignored", "reason": "unsupported event"}, status=200)
             data = payload.get("data")
@@ -409,11 +536,15 @@ class PipefacilAdapter(BasePlatformAdapter):
             if not isinstance(raw_messages, list) or not raw_messages:
                 raw_messages = data.get("message")
                 raw_messages = raw_messages if isinstance(raw_messages, list) else [raw_messages]
+            if len(raw_messages) > 100:
+                return web.json_response({"error": "too_many_messages"}, status=422)
             messages = [normalized for item in raw_messages if (normalized := _normalize_message(item))]
             if not messages:
                 return web.json_response({"error": "at least one message is required"}, status=422)
 
             channel_id = str(channel.get("id") or "").strip()
+            if self.channel_ids and channel_id not in self.channel_ids:
+                return web.json_response({"error": "channel_not_allowed"}, status=403)
             phone_number_id = str(channel.get("phoneNumberId") or "").strip()
             chat_scope = channel_id or phone_number_id or "default"
             chat_id = f"{chat_scope}:{phone}"
@@ -424,36 +555,78 @@ class PipefacilAdapter(BasePlatformAdapter):
                 return web.json_response({"status": "ignored", "reason": "no recent messages"}, status=200)
             if len(recent_messages) != len(messages):
                 logger.info("[pipefacil] Rejected %d non-recent messages from mixed webhook", len(messages) - len(recent_messages))
+            kwargs = {"payload": payload, "messages": recent_messages, "contact": contact,
+                      "channel": channel, "chat_id": chat_id, "phone": phone}
             try:
-                new_messages = await asyncio.to_thread(claim_messages, self.profile_home, chat_id, recent_messages, now=now)
-            except (OSError, sqlite3.Error):
+                job_id = await asyncio.to_thread(self.state.admit, kwargs, now=now, max_age=self.max_message_age_seconds)
+            except Full:
+                return web.json_response({"error": "inbound_queue_full"}, status=429, headers={"Retry-After": "5"})
+            except Conflict as exc:
+                return web.json_response({"error": str(exc)}, status=409)
+            except (OSError, sqlite3.Error, StateError):
                 logger.exception("[pipefacil] Could not persist inbound receipts; refused webhook admission")
                 return web.json_response({"error": "inbound receipt storage unavailable"}, status=503)
-            if not new_messages:
+            if job_id is None:
+                self._counts["duplicate"] += 1
                 return web.json_response({"status": "duplicate"}, status=200)
-            self._destinations[chat_id] = {
-                "phone": phone,
-                "channel_id": channel_id,
-                "phone_number_id": phone_number_id,
-                "name": str(contact.get("name") or phone),
-            }
-            task = asyncio.create_task(
-                self._process_event(
-                    payload=payload,
-                    messages=new_messages,
-                    contact=contact,
-                    channel=channel,
-                    chat_id=chat_id,
-                    phone=phone,
-                ),
-                name=f"pipefacil:{chat_scope}:{_message_identity(new_messages[-1], phone)}",
-            )
-            self._inbound_tasks.add(task)
-            task.add_done_callback(self._inbound_task_finished)
+            self._counts["admitted"] += 1
+            self._schedule(chat_id)
             return web.json_response(
-                {"status": "accepted", "message_id": str(new_messages[-1].get("id") or "")},
+                {"status": "accepted", "job_id": str(job_id)},
                 status=200,
             )
+
+    def _schedule(self, chat):
+        if chat in self._workers or self._closing:
+            return
+        task = asyncio.create_task(self._drain(chat), name="pipefacil:" + digest(chat)[:16])
+        self._workers[chat] = task
+        self._inbound_tasks.add(task)
+        task.add_done_callback(self._inbound_task_finished)
+
+    async def _drain(self, chat):
+        try:
+            while not self._closing and not self._ready_error:
+                async with self._slots:
+                    pending = await asyncio.to_thread(self.state.next, chat)
+                    if pending is None:
+                        return
+                    job_id, kwargs = pending
+                    channel, contact = kwargs["channel"], kwargs["contact"]
+                    self._destinations[chat] = {"phone": kwargs["phone"], "name": str(contact.get("name") or ""),
+                                                "channel_id": str(channel.get("id") or ""),
+                                                "phone_number_id": str(channel.get("phoneNumberId") or "")}
+                    token = _INGRESS_JOB.set((self, job_id))
+                    try:
+                        with self._runtime_scope():
+                            async with asyncio.timeout(self.turn_timeout):
+                                await self._process_event(**kwargs)
+                        await asyncio.to_thread(self.state.finish, job_id, "completed")
+                    except asyncio.CancelledError:
+                        await asyncio.to_thread(self.state.finish, job_id, "interrupted", "gateway_stopped")
+                        raise
+                    except Exception:
+                        # No payload, phone, signature, model result or raw upstream error in logs.
+                        logger.warning("[pipefacil] Job %s failed; inspect the private journal", job_id)
+                        await asyncio.to_thread(self.state.finish, job_id, "failed", "processing_failed")
+                    finally:
+                        _INGRESS_JOB.reset(token)
+                        self._destinations.pop(chat, None)
+                    if time.time() - self._last_maintenance > 300:
+                        self._last_maintenance = time.time()
+                        await asyncio.to_thread(self.state.prune)
+                        with self._turn_context_lock:
+                            protected = [p for contexts in self._active_turn_context.values() for c in contexts for p in c.get("media_paths", [])]
+                        await asyncio.to_thread(clean_cache, self.profile_home, protected=protected)
+        finally:
+            self._workers.pop(chat, None)
+            # A request may have committed after next() saw an empty queue, but
+            # before this worker removed itself. Recheck after removing ownership.
+            if not self._closing and not self._ready_error:
+                with self.state.db() as db:
+                    queued = db.execute("SELECT 1 FROM jobs WHERE chat=? AND state='queued' LIMIT 1", (chat,)).fetchone()
+                if queued:
+                    self._schedule(chat)
 
     def _inbound_task_finished(self, task: asyncio.Task) -> None:
         self._inbound_tasks.discard(task)
@@ -562,6 +735,10 @@ class PipefacilAdapter(BasePlatformAdapter):
                 )
             return
 
+        if any(not m.get("fromMe") and ADMIN.search(str(m.get("body") or "")) for m in messages):
+            await self._send_control_reply(chat_id, ADMIN_REPLY)
+            return
+
         current_ids = {
             str(identifier)
             for message in messages
@@ -607,6 +784,8 @@ class PipefacilAdapter(BasePlatformAdapter):
                     continue
                 prior.append(_history_line(item))
             history_text = "\n".join(prior) if prior else "(Sem mensagens anteriores encontradas.)"
+            if len(history_text) > 60000:
+                history_text = "[Histórico limitado; contexto mais recente preservado.]\n" + history_text[-60000:]
             if has_more and reset_marker is None:
                 history_text = "[Há mensagens anteriores fora das últimas mensagens carregadas.]\n" + history_text
             history_context = (
@@ -667,6 +846,8 @@ class PipefacilAdapter(BasePlatformAdapter):
             _message_line_with_media(message, index, len(messages), result)
             for index, (message, result) in enumerate(zip(messages, media_results), start=1)
         )
+        if len(current_text) > 60000:
+            current_text = "[Lote textual limitado; mensagens mais recentes preservadas.]\n" + current_text[-60000:]
         media_urls = [result.path for result in media_results if result is not None and result.path]
         media_types = [result.mime_type for result in media_results if result is not None and result.path]
         for result in media_results:
@@ -693,7 +874,8 @@ class PipefacilAdapter(BasePlatformAdapter):
         event = _new_message_event(
             text=prompt,
             message_type=(
-                MessageType.PHOTO if any(mime.startswith("image/") for mime in media_types)
+                MessageType.VOICE if any(mime.startswith("audio/") for mime in media_types)
+                else MessageType.PHOTO if any(mime.startswith("image/") for mime in media_types)
                 else MessageType.DOCUMENT if media_types else MessageType.TEXT
             ),
             user_id=source.user_id,
@@ -704,14 +886,45 @@ class PipefacilAdapter(BasePlatformAdapter):
             timestamp=_timestamp_from_message(messages[-1].get("timestamp") or payload.get("timestamp")),
             media_urls=media_urls,
             media_types=media_types,
+            media_text_inlined=[False] * len(media_urls),
             allow_gateway_control=False,
             reply_expected=True,
         )
         event._pipefacil_turn_context = {
             "deal_seq": trusted_seq,
             "media_paths": frozenset(str(Path(path).resolve()) for path in media_urls),
+            "contact": dict(contact), "destination": dict(self._destinations.get(chat_id, {})), "active": True,
+            "job_id": _INGRESS_JOB.get()[1] if _INGRESS_JOB.get() is not None else None,
         }
-        await self.handle_message(event)
+        ingress = _INGRESS_JOB.get()
+        event._pipefacil_done = asyncio.get_running_loop().create_future() if ingress is not None else None
+        task = None
+        session_key = self._event_session_key(event)
+        try:
+            await self.handle_message(event)
+            if ingress is not None:
+                if getattr(event, "_gateway_accepted", True) is False:
+                    raise RuntimeError("Hermes rejected the event")
+                task = self._session_tasks.get(session_key)
+                if task is not None:
+                    await asyncio.shield(task)
+                outcome = await event._pipefacil_done
+                if getattr(outcome, "value", outcome) != "success":
+                    raise RuntimeError("Hermes turn failed")
+        except BaseException:
+            event._pipefacil_turn_context["active"] = False
+            if ingress is not None:
+                task = task or self._session_tasks.get(session_key)
+                try:
+                    if self.gateway_runner is not None:
+                        self.gateway_runner._interrupt_running_turn(session_key, interrupt_reason="Pipefacil turn stopped",
+                            invalidation_reason="pipefacil_turn_stopped", tool_reason="Pipefacil cancellation")
+                    await self.cancel_session_processing(session_key)
+                    if task is not None and not task.done():
+                        raise RuntimeError("Hermes task did not stop")
+                except Exception:
+                    self._ready_error = "hermes_cancellation_failed"
+            raise
 
     async def on_processing_start(self, event: MessageEvent) -> None:
         """Bind facts when Hermes actually starts the background model turn."""
@@ -727,6 +940,8 @@ class PipefacilAdapter(BasePlatformAdapter):
     async def on_processing_complete(self, event: MessageEvent, outcome: Any) -> None:
         """Revoke the exact event on completion, failure, or cancellation."""
         context = getattr(event, "_pipefacil_turn_context", None)
+        if context is not None:
+            context["active"] = False
         chat_id = str(event.source.chat_id)
         with self._turn_context_lock:
             remaining = [item for item in self._active_turn_context.get(chat_id, []) if item is not context]
@@ -735,6 +950,9 @@ class PipefacilAdapter(BasePlatformAdapter):
             else:
                 self._active_turn_context.pop(chat_id, None)
         token = getattr(event, "_pipefacil_context_token", None)
+        done = getattr(event, "_pipefacil_done", None)
+        if done is not None and not done.done():
+            done.set_result(outcome)
         if token is not None:
             _ACTIVE_PIPEFACIL_TURN.reset(token)
             event._pipefacil_context_token = None
@@ -744,9 +962,19 @@ class PipefacilAdapter(BasePlatformAdapter):
         if active is None or active[0] is not self or active[1] != str(chat_id):
             return None
         context = active[2]
+        if not context.get("active", True):
+            return None
         with self._turn_context_lock:
             contexts = self._active_turn_context.get(str(chat_id), [])
             return context if any(item is context for item in contexts) else None
+
+    def toolsets_for_source(self, source):
+        return ["pipefacil"]
+
+    async def _deliver_attachments(self, event, extracted, metadata, *, anything_sent, record_delivery):
+        # Only pipefacil_send_messages can publish media approved for this profile.
+        # Native extraction must never publish arbitrary paths/URLs from model text.
+        return None
 
     def trusted_turn_context(self, chat_id: str) -> dict[str, Any] | None:
         """Facts bound to this worker's exact live event, never a queued follow-up."""
@@ -767,7 +995,8 @@ class PipefacilAdapter(BasePlatformAdapter):
             return None
         with self._turn_context_lock:
             accepted = list(context.get("accepted_texts", []))
-        normalize = lambda text: " ".join(text.split())
+        def normalize(text):
+            return " ".join(text.split())
         final = normalize(content)
         for message in accepted:
             if final == normalize(message["text"]):
@@ -989,7 +1218,7 @@ def reserve_preliminary_messages(profile_home: Path, turn_id: str, count: int) -
 
 
 def _credentials_present() -> bool:
-    return bool(get_scoped_secret("PIPEFACIL_API_KEY", "").strip())
+    return bool(get_scoped_secret("PIPEFACIL_API_KEY", "").strip() and get_scoped_secret("PIPEFACIL_WEBHOOK_SECRET", ""))
 
 
 def check_requirements() -> bool:
@@ -1015,7 +1244,9 @@ def validate_config(config: PlatformConfig) -> bool:
 
 
 def is_connected(config: PlatformConfig) -> bool:
-    return validate_config(config)
+    # Hermes uses this callback as a credential/configuration probe BEFORE
+    # constructing an adapter. Runtime readiness belongs to /health.
+    return _credentials_present()
 
 
 def _on_session_finalize(
@@ -1034,7 +1265,9 @@ def _env_enablement() -> dict[str, Any] | None:
     """Enable from the profile-local API key without copying it into YAML."""
     if not _credentials_present():
         return None
-    return {"host": "127.0.0.1", "port": DEFAULT_PORT, "path": DEFAULT_PATH}
+    # Constructor defaults handle missing values. Returning defaults here would
+    # overwrite an operator's explicit YAML host, port and path in Hermes.
+    return {}
 
 
 def _optional_registration_fields(**requested: Any) -> dict[str, Any]:
@@ -1055,7 +1288,7 @@ def register(ctx) -> None:
         check_fn=check_requirements,
         validate_config=validate_config,
         is_connected=is_connected,
-        required_env=["PIPEFACIL_API_KEY"],
+        required_env=["PIPEFACIL_API_KEY", "PIPEFACIL_WEBHOOK_SECRET"],
         allowed_users_env="PIPEFACIL_ALLOWED_USERS",
         install_hint="The Pipefacil plugin includes the webhook server and uses Hermes' aiohttp dependency.",
         env_enablement_fn=_env_enablement,
@@ -1071,12 +1304,16 @@ def register(ctx) -> None:
             "through the Pipefacil API automatically. For a normal text reply, write the customer-facing "
             "answer directly; no send tool is needed. Use pipefacil_send_messages only for preliminary "
             "split messages or approved media. Keep the final answer addressed to the customer; "
-            "do not narrate tools, API acceptance, delivery confirmation, or platform status. "
+            "do not narrate tools, API acceptance, delivery confirmation, or platform status. Never advertise /help, gateway commands or operator setup to a customer. "
             "If accepted split text messages already contain the complete answer, use their exact "
             "text in order as the final answer; the plugin reuses their delivery without sending "
             "a duplicate. An unavailable reference file does not prevent you from "
             "answering with known facts or asking a short qualifying question. Invoke each local tool "
             "separately; do not batch multiple local tools in one tool_call."
+            " Successful native voice transcripts are included in the current message. Use them directly; "
+            "do not read raw audio with a file tool. If automatic transcription failed, ask the customer "
+            "to resend or type the message. Native image context is also included automatically. "
+            "Use pipefacil_read_profile_file for document contents, never terminal or shell."
         ),
         **_optional_registration_fields(notify_missing_home_channel=False),
     )

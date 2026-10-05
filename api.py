@@ -14,9 +14,10 @@ API_TIMEOUT_SECONDS = 20.0
 
 
 class PipefacilAPIError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None):
+    def __init__(self, message: str, *, status_code: int | None = None, definite_rejection: bool = False):
         super().__init__(message)
         self.status_code = status_code
+        self.definite_rejection = definite_rejection
 
 
 def normalize_api_base_url(value: str | None) -> str:
@@ -30,6 +31,7 @@ def normalize_api_base_url(value: str | None) -> str:
         or parsed.password
         or parsed.query
         or parsed.fragment
+        or parsed.path
     ):
         raise PipefacilAPIError(
             "api_base_url must be an HTTPS origin (HTTP is allowed for localhost only)."
@@ -44,7 +46,7 @@ def _decode_response(response: httpx.Response) -> dict[str, Any]:
         payload = None
     if not isinstance(payload, dict):
         payload = {}
-    if response.is_error:
+    if not 200 <= response.status_code < 300:
         code = payload.get("code") or payload.get("error")
         # Avoid returning full upstream payloads: they can contain lead PII or internal details.
         if response.status_code == 403:
@@ -58,6 +60,8 @@ def _decode_response(response: httpx.Response) -> dict[str, Any]:
         else:
             message = f"Pipefacil API returned HTTP {response.status_code}."
         raise PipefacilAPIError(message, status_code=response.status_code)
+    if "data" not in payload or payload["data"] is None:
+        raise PipefacilAPIError("Pipefacil returned an invalid API response.")
     return payload
 
 
@@ -69,6 +73,7 @@ def request_json(
     path: str,
     params: dict[str, Any] | None = None,
     payload: dict[str, Any] | None = None,
+    files: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not api_key.strip():
         raise PipefacilAPIError("PIPEFACIL_API_KEY is not configured for this profile.")
@@ -77,14 +82,21 @@ def request_json(
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key.strip()}",
-        "User-Agent": "hermes-pipefacil-plugin/0.1.0",
+        "User-Agent": "hermes-pipefacil-plugin/0.4.0",
     }
     try:
-        with httpx.Client(timeout=API_TIMEOUT_SECONDS, follow_redirects=False) as client:
-            response = client.request(method, url, headers=headers, json=payload)
+        with httpx.Client(timeout=API_TIMEOUT_SECONDS, follow_redirects=False, trust_env=False) as client:
+            with client.stream(method, url, headers=headers, json=payload, files=files) as response:
+                chunks, size = [], 0
+                for chunk in response.iter_bytes(64 * 1024):
+                    size += len(chunk)
+                    if size > 2 * 1024 * 1024:
+                        raise PipefacilAPIError("Pipefacil API response exceeded the 2 MiB limit.")
+                    chunks.append(chunk)
+                buffered = httpx.Response(response.status_code, headers=response.headers, content=b"".join(chunks))
     except httpx.HTTPError as exc:
         raise PipefacilAPIError("Could not reach the Pipefacil API (network or timeout error).") from exc
-    return _decode_response(response)
+    return _decode_response(buffered)
 
 
 def fetch_conversation_history(
@@ -191,3 +203,44 @@ def update_deal(
         path=f"/api/v1/deals/{int(seq)}",
         payload=properties,
     )
+
+
+def get_deal(*, api_key, base_url, seq):
+    data = request_json(api_key=api_key, base_url=base_url, method="GET", path=f"/api/v1/deals/{int(seq)}")["data"]
+    if not isinstance(data, dict) or data.get("seq") != seq:
+        raise PipefacilAPIError("Pipefacil returned an invalid deal response.")
+    return data
+
+
+def get_contact(*, api_key, base_url, contact_id):
+    data = request_json(api_key=api_key, base_url=base_url, method="GET",
+                        path=f"/api/v1/contacts/{quote(contact_id, safe='')}")["data"]
+    if not isinstance(data, dict) or data.get("id") != contact_id:
+        raise PipefacilAPIError("Pipefacil returned an invalid contact response.")
+    return data
+
+
+def get_pipelines(*, api_key, base_url):
+    data = request_json(api_key=api_key, base_url=base_url, method="GET", path="/api/v1/pipelines")["data"]
+    if not isinstance(data, list) or not all(isinstance(p, dict) for p in data):
+        raise PipefacilAPIError("Pipefacil returned invalid pipelines.")
+    return data
+
+
+def upload_media(*, api_key, base_url, filename, mime_type, body):
+    data = request_json(api_key=api_key, base_url=base_url, method="POST", path="/api/v1/custom-fields/upload",
+                        files={"file": (filename, body, mime_type)})["data"]
+    if not isinstance(data, dict) or not isinstance(data.get("key"), str) or not data["key"]:
+        raise PipefacilAPIError("Pipefacil returned an invalid upload receipt.")
+    return data
+
+
+def media_url(*, api_key, base_url, storage_key):
+    data = request_json(api_key=api_key, base_url=base_url, method="GET", path="/api/v1/custom-fields/file",
+                        params={"key": storage_key})["data"]
+    if not isinstance(data, dict) or not isinstance(data.get("url"), str):
+        raise PipefacilAPIError("Pipefacil returned an invalid temporary media URL.")
+    parsed = urlsplit(data["url"])
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+        raise PipefacilAPIError("Uploaded media requires HTTPS object storage in the CRM configuration.")
+    return data["url"]

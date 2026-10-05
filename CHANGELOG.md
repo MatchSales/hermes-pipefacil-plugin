@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- Require the original AI-agent HMAC secret, support current/next signatures and verify the exact JSON before gzip. Handle both raw gzip and Hermes' already-decompressed shared-listener requests.
+- Atomically persist message receipts and bounded per-conversation jobs. Wait for native background completion before advancing; recover only unstarted recent jobs and revoke effects on timeout/cancellation.
+- Add profile-local `media/` catalogs and `fileId` sends. Use the existing public CRM upload API, cache receipts by content/profile/API credential, and renew temporary storage URLs before each send.
+- Pass current audio to native Hermes STT; retain image/document support. Validate media signatures, pin public DNS connections, disable redirects/proxies and expire inbound cache files.
+- Enforce the public toolset at runtime, including wrapper calls. Add `pipefacil_current_deal`, configured writable fields/stages, fresh contact/responsible checks and PATCH readback confirmation.
+- Journal HTTP effects before writes; reuse confirmed receipts and stop automatic repeats after ambiguous outcomes. Add private operator reconciliation, real readiness/counters, API response bounds and strict JSON envelopes.
+- Add CI against official/current unmodified Hermes, real HTTP/shared-ingress/native-lifecycle regression tests, and migration/operation documentation.
+
 ## 0.3.5
 
 - Ignore messages older than five minutes, missing/invalid message timestamps, and timestamps more than 30 seconds in the future. Use the message's original time, including for `/reset`, rather than the webhook delivery header. Configure `platforms.pipefacil.extra.max_message_age_seconds` from 1 to 3600 seconds (default 300).

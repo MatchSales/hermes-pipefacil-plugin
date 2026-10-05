@@ -1,0 +1,39 @@
+name: HTTP plugin checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        source: [official, current]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python -m pip install -r requirements-test.txt
+      - run: ruff check .
+      - name: Test against unmodified Hermes
+        env:
+          TEST_SOURCE: ${{ matrix.source }}
+        run: |
+          docker run --rm --entrypoint /bin/sh -w /tmp \
+            -v "$PWD:/plugin:ro" -e TEST_SOURCE \
+            -e HERMES_HOME=/tmp/hermes-http-tests \
+            -e HERMES_RUNTIME_DIR=/tmp/hermes-http-runtime \
+            nousresearch/hermes-agent@sha256:d4da4a40cd7a28aba983775d9fd31d94cbf153eeb0cb9e844d6d0f612b7c24db \
+            -c 'set -eu
+              cp -a /plugin /tmp/plugin
+              uv pip install --python /opt/hermes/.venv/bin/python -r /tmp/plugin/requirements-test.txt
+              HERMES_SOURCE=/opt/hermes
+              if [ "$TEST_SOURCE" = current ]; then
+                git clone --depth=1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-current
+                HERMES_SOURCE=/tmp/hermes-current
+              fi
+              export PYTHONPATH="$HERMES_SOURCE:/tmp/plugin/tests"
+              /opt/hermes/.venv/bin/python -m pytest --import-mode=importlib /tmp/plugin/tests -q'

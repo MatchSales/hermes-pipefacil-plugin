@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import hashlib
+import hmac
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -22,6 +24,18 @@ def _adapter(home):
     adapter._runtime_scope = contextlib.nullcontext
     adapter._destinations = {}
     adapter._inbound_tasks = set()
+    adapter.webhook_secret = "test-secret"
+    adapter.webhook_secret_next = ""
+    adapter._closing = False
+    adapter._ready_error = None
+    adapter._workers = {}
+    adapter._slots = asyncio.Semaphore(4)
+    adapter.turn_timeout = 30
+    adapter._last_maintenance = 0
+    adapter.channel_ids = frozenset()
+    adapter._counts = {"authenticated": 0, "rejected": 0, "duplicate": 0, "admitted": 0}
+    state = __import__(module.__package__ + ".state", fromlist=["State"])
+    adapter.state = state.State(home)
     return adapter
 
 
@@ -37,7 +51,9 @@ async def _post(adapter, messages, channel="channel"):
     class Request:
         content_length = len(data)
         # A new delivery timestamp never makes an old message fresh.
-        headers = {"X-Pipefacil-Timestamp": str(int(time.time() * 1000))}
+        timestamp = str(int(time.time() * 1000))
+        headers = {"X-PipeFacil-Timestamp": timestamp, "X-PipeFacil-Signature-256": "sha256=" + hmac.new(
+            adapter.webhook_secret.encode(), timestamp.encode() + b"." + data, hashlib.sha256).hexdigest()}
         async def read(self):
             return data
     response = await adapter._handle_webhook(Request())
@@ -55,9 +71,12 @@ def test_missing_invalid_or_ambiguous_message_time_never_dispatches(tmp_path, ti
     message = _message()
     message["timestamp"] = timestamp
     status, result = asyncio.run(_post(adapter, [message]))
-    assert status == 200 and result["status"] == "ignored"
+    if timestamp == float("inf"):
+        assert status == 400 and result["error"] == "invalid_json"
+    else:
+        assert status == 200 and result["status"] == "ignored"
     assert adapter._destinations == {}
-    assert not (tmp_path / "pipefacil-state").exists()
+    assert adapter.state.status()["jobs"] == {}
 
 
 @pytest.mark.parametrize("body,age", [("oi", 3600), ("/reset", 3600), ("oi", -120)])
@@ -105,7 +124,8 @@ def test_receipts_survive_adapter_restart_and_are_scoped_to_profile_and_channel(
 
 def test_receipt_database_failure_refuses_admission(tmp_path):
     adapter = _adapter(tmp_path)
-    (tmp_path / "pipefacil-state").write_text("cannot be a directory")
+    adapter.state.path.unlink()
+    adapter.state.path.mkdir()
     async def forbidden(**kwargs):
         pytest.fail("unrecorded messages must not be dispatched")
     adapter._process_event = forbidden

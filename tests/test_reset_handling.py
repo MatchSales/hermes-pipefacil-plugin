@@ -107,7 +107,7 @@ def test_message_event_supports_hermes_with_and_without_reply_expected(monkeypat
     {},
     {"X-Pipefacil-Timestamp": "0", "X-Pipefacil-Signature-256": "sha256=invalid"},
 ])
-def test_webhook_reaches_payload_validation_without_signature(monkeypatch, headers):
+def test_webhook_rejects_unsigned_or_invalid_signature_before_payload_validation(monkeypatch, headers):
     adapter_module = _adapter_with_fake_gateway(monkeypatch)
     aiohttp = ModuleType("aiohttp")
     aiohttp.web = SimpleNamespace(
@@ -118,10 +118,15 @@ def test_webhook_reaches_payload_validation_without_signature(monkeypatch, heade
         adapter_module, "get_scoped_secret",
         lambda name, default="": "api-key" if name == "PIPEFACIL_API_KEY" else "",
     )
-    assert adapter_module._credentials_present() is True
+    assert adapter_module._credentials_present() is False
 
     adapter = object.__new__(adapter_module.PipefacilAdapter)
     adapter._runtime_scope = contextlib.nullcontext
+    adapter._closing = False
+    adapter._ready_error = None
+    adapter.webhook_secret = "test-secret"
+    adapter.webhook_secret_next = ""
+    adapter._counts = {"authenticated": 0, "rejected": 0}
     body = json.dumps({"type": "message.received", "data": {}}).encode()
     request_headers = headers
 
@@ -133,8 +138,8 @@ def test_webhook_reaches_payload_validation_without_signature(monkeypatch, heade
             return body
 
     response = asyncio.run(adapter._handle_webhook(Request()))
-    assert response.status == 422
-    assert response.payload == {"error": "contact phone is required"}
+    assert response.status == 401
+    assert response.payload["error"] in {"invalid_timestamp", "expired_signature"}
 
 
 @pytest.mark.parametrize("outcome", ["ok", "gateway_error", "purge_error"])

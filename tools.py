@@ -15,9 +15,9 @@ from .api import (
     DEFAULT_API_BASE_URL,
     PipefacilAPIError,
     normalize_api_base_url,
-    update_deal,
 )
 from .media import resolve_media_link
+from .library import catalog
 
 logger = logging.getLogger(__name__)
 
@@ -73,18 +73,47 @@ async def _update_deal(args: dict[str, Any], *, session_id: str = "", **kwargs: 
         return tool_error(f"Unsupported deal fields: {', '.join(unknown)}")
     api_key = get_scoped_secret("PIPEFACIL_API_KEY", "") or ""
     try:
-        await asyncio.to_thread(
-            update_deal,
-            api_key=api_key,
-            base_url=_api_base_url(),
-            seq=seq,
-            properties=properties,
-        )
+        result = await asyncio.to_thread(adapter.crm.update, context, api_key, properties,
+                                        lambda: adapter.trusted_turn_context(chat_id) is not None)
     except PipefacilAPIError as exc:
         return tool_error(str(exc), status_code=exc.status_code)
     except (TypeError, ValueError) as exc:
         return tool_error(str(exc))
-    return tool_result({"success": True, "seq": seq, "updated_fields": sorted(properties)})
+    return tool_result(result)
+
+
+async def _current_deal(args, *, session_id="", **kwargs):
+    from hermes_constants import get_hermes_home
+    from tools.registry import tool_error, tool_result
+    from .adapter import adapter_for_profile
+    if args:
+        return tool_error("No deal lookup parameters are accepted.")
+    home = Path(get_hermes_home()).resolve()
+    chat, error = _active_pipefacil_chat(session_id, home)
+    if error:
+        return tool_error(error)
+    adapter = adapter_for_profile(home, chat)
+    context = adapter.trusted_turn_context(chat)
+    try:
+        result = await asyncio.to_thread(adapter.crm.read, context, get_scoped_secret("PIPEFACIL_API_KEY", ""))
+        return tool_result(result)
+    except (PipefacilAPIError, ValueError) as exc:
+        return tool_error(str(exc))
+
+
+def _list_media(args, *, session_id="", **kwargs):
+    from hermes_constants import get_hermes_home
+    from tools.registry import tool_error, tool_result
+    if args:
+        return tool_error("No profile or path parameters are accepted.")
+    home = Path(get_hermes_home()).resolve()
+    _, error = _active_pipefacil_chat(session_id, home)
+    if error:
+        return tool_error(error)
+    try:
+        return tool_result({"files": [asset.public() for asset in catalog(home)], "limit": 200})
+    except (OSError, ValueError) as exc:
+        return tool_error(str(exc))
 
 
 def _read_profile_file(
@@ -135,6 +164,11 @@ def _read_profile_file(
         )
         if not approved or not resolved.is_file() or resolved.stat().st_size > 25 * 1024 * 1024:
             return tool_error("Reading this file is not allowed for the current Pipefacil conversation.")
+        mime = mimetypes.guess_type(str(resolved))[0] or ""
+        if mime.startswith("audio/") or resolved.suffix.lower() in {".ogg", ".opus", ".m4a", ".wav", ".mp3", ".flac", ".aac"}:
+            return tool_error("Audio uses automatic native transcription, already included in this turn when successful. Use that transcript directly; do not try to read raw audio. If transcription failed, ask the customer to resend or type the message.")
+        if mime.startswith("image/"):
+            return tool_error("Images use native vision, already included in this turn when successful. Use the visual context directly; this document reader cannot analyze image bytes.")
     except (OSError, RuntimeError, ValueError):
         return tool_error("The requested file is unavailable or outside this profile.")
     try:
@@ -201,6 +235,8 @@ def _prepare_outbound_message(item: Any, profile_home: Path) -> dict[str, Any]:
     if not isinstance(item, dict):
         raise ValueError("Each message must be an object.")
     kind = item.get("type")
+    if set(item) - {"type", "text", "url", "fileId", "caption"}:
+        raise ValueError("Unexpected outbound message fields.")
     caption = item.get("caption")
     if caption is not None and (not isinstance(caption, str) or len(caption) > 1000):
         raise ValueError("A caption must be text of at most 1000 characters.")
@@ -208,11 +244,18 @@ def _prepare_outbound_message(item: Any, profile_home: Path) -> dict[str, Any]:
         text = item.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > 4000:
             raise ValueError("Text messages must contain 1–4000 characters.")
-        if caption is not None or item.get("url") is not None:
+        if caption is not None or item.get("url") is not None or item.get("fileId") is not None:
             raise ValueError("Text messages accept only the text field.")
         return {"type": "text", "text": text}
     if kind not in {"image", "document"}:
         raise ValueError("Message type must be text, image, or document.")
+    if item.get("fileId") is not None:
+        if item.get("url") is not None or item.get("text") is not None:
+            raise ValueError("Media uses either fileId or an approved URL.")
+        identity = item["fileId"]
+        if not isinstance(identity, str) or not any(a.id == identity and a.kind == kind for a in catalog(profile_home)):
+            raise ValueError("That fileId and type are not in this profile's media catalog.")
+        return {"type": kind, "fileId": identity, **({"caption": caption} if caption else {})}
     url = item.get("url")
     if not isinstance(url, str):
         raise ValueError("An image or document requires a URL listed in this profile's SOUL.md.")
@@ -303,6 +346,14 @@ async def _send_messages(
 
 
 def register_tools(ctx) -> None:
+    for name, handler, description, asynchronous in (
+        ("pipefacil_list_media", _list_media, "List this profile's approved local image/document library. Select a file id, then use pipefacil_send_messages with fileId. No arbitrary paths or profiles.", False),
+        ("pipefacil_current_deal", _current_deal, "Read the current conversation's deal, its permitted fields and stages. The plugin verifies contact and current assignment through the CRM API. No other deal can be selected.", True),
+    ):
+        ctx.register_tool(name=name, toolset="pipefacil", description=description,
+                          schema={"name": name, "description": description, "parameters": {
+                              "type": "object", "properties": {}, "additionalProperties": False}},
+                          handler=handler, check_fn=_pipefacil_available, is_async=asynchronous)
     name = "pipefacil_update_deal"
     ctx.register_tool(
         name=name,
@@ -337,7 +388,6 @@ def register_tools(ctx) -> None:
                                 "type": "object",
                                 "properties": {
                                     "name": {"type": "string"},
-                                    "phone": {"type": "string"},
                                     "email": {"type": "string"},
                                 },
                                 "additionalProperties": False,
@@ -393,7 +443,8 @@ def register_tools(ctx) -> None:
             "Send one or two messages to the lead in the CURRENT Pipefacil conversation, "
             "then Hermes sends your final answer automatically. For an ordinary single text reply, "
             "write only your final answer. Use this tool to split a reply or send an "
-            "approved image/document before the final text. For media, use only an exact HTTPS URL "
+            "approved image/document before the final text. Prefer fileId returned by pipefacil_list_media for local profile files. "
+            "For existing remote media, use only an exact HTTPS URL "
             "listed in this profile's SOUL.md under the Pipefacil media library. This tool has no "
             "recipient/phone parameter. You can send at most two preliminary messages total per turn, "
             "even if the tool is called more than once. A successful result means the API accepted the request, not "
@@ -422,6 +473,7 @@ def register_tools(ctx) -> None:
                                 "type": {"type": "string", "enum": ["text", "image", "document"]},
                                 "text": {"type": "string", "maxLength": 4000},
                                 "url": {"type": "string", "maxLength": 4000},
+                                "fileId": {"type": "string", "maxLength": 32},
                                 "caption": {"type": "string", "maxLength": 1000},
                             },
                             "required": ["type"],

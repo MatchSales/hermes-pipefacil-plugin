@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import json
 import sys
 import threading
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -234,6 +232,7 @@ def test_current_webhook_media_reaches_native_hermes_event_and_failures_are_expl
     captured = []
 
     class FakeSource:
+        chat_id = "channel-1:+5511999999999"
         user_id = "lead-1"
         user_name = "Lead"
         message_id = None
@@ -246,6 +245,8 @@ def test_current_webhook_media_reaches_native_hermes_event_and_failures_are_expl
     adapter._hermes_profile_name = None
     adapter._turn_context_lock = threading.RLock()
     adapter._active_turn_context = {}
+    adapter._destinations = {}
+    adapter._event_session_key = lambda event: "media-test"
     adapter._history_reset_marker = lambda chat_id: None
     adapter.build_source = lambda **kwargs: FakeSource()
 
@@ -275,6 +276,7 @@ def test_current_webhook_media_reaches_native_hermes_event_and_failures_are_expl
     event = captured[-1]
     assert len(event.media_urls) == 1
     assert event.media_types == [mime]
+    assert event.media_text_inlined == [False]
     assert Path(event.media_urls[0]).read_bytes() == body
     assert "Anexo atual recebido" in event.text
 
