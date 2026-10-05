@@ -41,6 +41,7 @@ from .security import AdmissionError, decode_body, verify, parse_json, ADMIN, AD
 from .state import State, StateError, Full, Conflict, digest
 from .library import read_asset
 from .crm import CRM
+from .guidance import PIPEFACIL_CHANNEL_PROMPT
 from .reset import (
     _history_after_reset,
     _messages_after_reset,
@@ -873,6 +874,7 @@ class PipefacilAdapter(BasePlatformAdapter):
         )
         event = _new_message_event(
             text=prompt,
+            channel_prompt=PIPEFACIL_CHANNEL_PROMPT,
             message_type=(
                 MessageType.VOICE if any(mime.startswith("audio/") for mime in media_types)
                 else MessageType.PHOTO if any(mime.startswith("image/") for mime in media_types)

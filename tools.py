@@ -18,6 +18,7 @@ from .api import (
 )
 from .media import resolve_media_link
 from .library import catalog
+from .guidance import TOOL_DESCRIPTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -347,8 +348,8 @@ async def _send_messages(
 
 def register_tools(ctx) -> None:
     for name, handler, description, asynchronous in (
-        ("pipefacil_list_media", _list_media, "List this profile's approved local image/document library. Select a file id, then use pipefacil_send_messages with fileId. No arbitrary paths or profiles.", False),
-        ("pipefacil_current_deal", _current_deal, "Read the current conversation's deal, its permitted fields and stages. The plugin verifies contact and current assignment through the CRM API. No other deal can be selected.", True),
+        ("pipefacil_list_media", _list_media, TOOL_DESCRIPTIONS["pipefacil_list_media"], False),
+        ("pipefacil_current_deal", _current_deal, TOOL_DESCRIPTIONS["pipefacil_current_deal"], True),
     ):
         ctx.register_tool(name=name, toolset="pipefacil", description=description,
                           schema={"name": name, "description": description, "parameters": {
@@ -358,15 +359,10 @@ def register_tools(ctx) -> None:
     ctx.register_tool(
         name=name,
         toolset="pipefacil",
-        description=(
-            "Update fields of the deal in the CURRENT Pipefacil event. The deal seq is "
-            "resolved by the plugin, never supplied by the model. Only update when the conversation gives reliable evidence "
-            "for the change. For a stage move pass its exact stageId; a lost stage also requires lostReason. "
-            "Never use this to mark a deal won or lost based only on a promise or an inference."
-        ),
+        description=TOOL_DESCRIPTIONS[name],
         schema={
             "name": name,
-            "description": "Partially update one Pipefacil deal in this profile's workspace.",
+            "description": TOOL_DESCRIPTIONS[name],
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -410,15 +406,10 @@ def register_tools(ctx) -> None:
     ctx.register_tool(
         name=read_name,
         toolset="pipefacil",
-        description=(
-            "Read a file from this profile's operator-approved knowledge folder or an attachment "
-            "received in the current lead turn. Use path='knowledge/' to list approved reference files, "
-            "then read an exact listed path; wildcards are not supported. No files from other profiles, "
-            "credentials, transcripts, configuration, or plugin code are available. Read-only."
-        ),
+        description=TOOL_DESCRIPTIONS[read_name],
         schema={
             "name": read_name,
-            "description": "Read approved reference files or current lead attachments; list only the knowledge folder.",
+            "description": TOOL_DESCRIPTIONS[read_name],
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -439,27 +430,10 @@ def register_tools(ctx) -> None:
     ctx.register_tool(
         name=send_name,
         toolset="pipefacil",
-        description=(
-            "Send one or two messages to the lead in the CURRENT Pipefacil conversation, "
-            "then Hermes sends your final answer automatically. For an ordinary single text reply, "
-            "write only your final answer. Use this tool to split a reply or send an "
-            "approved image/document before the final text. Prefer fileId returned by pipefacil_list_media for local profile files. "
-            "For existing remote media, use only an exact HTTPS URL "
-            "listed in this profile's SOUL.md under the Pipefacil media library. This tool has no "
-            "recipient/phone parameter. You can send at most two preliminary messages total per turn, "
-            "even if the tool is called more than once. A successful result means the API accepted the request, not "
-            "that WhatsApp delivery was confirmed. Do not narrate API or delivery status to the lead. "
-            "If the accepted text messages are the complete answer, use their exact text in order "
-            "as your final response; the plugin prevents duplicate delivery."
-        ),
+        description=TOOL_DESCRIPTIONS[send_name],
         schema={
             "name": send_name,
-            "description": (
-                "Send split messages or approved media to the active lead. Ordinary text replies need "
-                "only a final answer. Keep the final answer customer-facing, without API or delivery "
-                "status. If these texts are the complete answer, use their exact text in order as "
-                "the final answer; the plugin prevents duplicate delivery."
-            ),
+            "description": TOOL_DESCRIPTIONS[send_name],
             "parameters": {
                 "type": "object",
                 "properties": {
