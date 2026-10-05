@@ -33,7 +33,9 @@ jobs:
               HERMES_SOURCE=/opt/hermes
               if [ "$TEST_SOURCE" = current ]; then
                 git clone --depth=1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-current
+                git -C /tmp/hermes-current rev-parse HEAD
                 HERMES_SOURCE=/tmp/hermes-current
               fi
-              export PYTHONPATH="$HERMES_SOURCE:/tmp/plugin/tests"
+              export HERMES_SOURCE PYTHONPATH="$HERMES_SOURCE:/tmp/plugin/tests"
+              /opt/hermes/.venv/bin/python -c "import gateway.platforms.base; print(gateway.platforms.base.__file__)"
               /opt/hermes/.venv/bin/python -m pytest --import-mode=importlib /tmp/plugin/tests -q'
