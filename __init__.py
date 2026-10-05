@@ -1,5 +1,7 @@
 """Native Hermes plugin entry point."""
 
+__version__ = "0.4.3"
+
 
 def register(ctx) -> None:
     from .tools import register_tools

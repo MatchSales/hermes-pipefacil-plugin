@@ -323,3 +323,9 @@ PDFs digitalizados sem camada de texto podem não ser extraídos.
 
 Ainda não foi escolhida uma licença open source. Consulte [LICENSE-NOTICE.md](LICENSE-NOTICE.md);
 deixar o repositório público não concede automaticamente direitos de reutilização.
+
+## Compatibilidade HTTP/Kafka (0.4.3)
+
+As orientações comuns têm revisão e fonte compartilhadas com o Kafka 0.1.1. Consulte
+[o contrato de compatibilidade e atualização coordenada](docs/plugin-parity.md).
+O health informa versão, revisão e capacidades. Os nomes e limites específicos de mídia permanecem próprios deste canal.
