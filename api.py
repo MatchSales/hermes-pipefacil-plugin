@@ -82,7 +82,7 @@ def request_json(
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key.strip()}",
-        "User-Agent": "hermes-pipefacil-plugin/0.4.0",
+        "User-Agent": "hermes-pipefacil-plugin/0.4.1",
     }
     try:
         with httpx.Client(timeout=API_TIMEOUT_SECONDS, follow_redirects=False, trust_env=False) as client:
@@ -93,7 +93,9 @@ def request_json(
                     if size > 2 * 1024 * 1024:
                         raise PipefacilAPIError("Pipefacil API response exceeded the 2 MiB limit.")
                     chunks.append(chunk)
-                buffered = httpx.Response(response.status_code, headers=response.headers, content=b"".join(chunks))
+                # iter_bytes() has already decoded Content-Encoding. Reusing that
+                # header on an in-memory Response would decode the body twice.
+                buffered = httpx.Response(response.status_code, content=b"".join(chunks))
     except httpx.HTTPError as exc:
         raise PipefacilAPIError("Could not reach the Pipefacil API (network or timeout error).") from exc
     return _decode_response(buffered)
