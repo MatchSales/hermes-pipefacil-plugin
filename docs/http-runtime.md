@@ -109,7 +109,7 @@ Sem userId configurado, conversas seguem disponíveis e mutações ficam desabil
 | URL legada para envio | URL HTTPS exata registrada no SOUL do próprio profile |
 | Anexo do histórico | Não é baixado; contexto informa conteúdo não textual |
 
-Configure visão/STT no Hermes. Falhas não autorizam o agente a afirmar que analisou o conteúdo.
+Configure visão/STT no Hermes. WAV, OGG/Opus, MP3, MP4/M4A, AAC, FLAC e WebM são aceitos na entrada; aliases comuns do storage são normalizados e os bytes continuam validados. Falhas não autorizam o agente a afirmar que analisou o conteúdo.
 Esta versão envia texto, imagens e documentos. Geração de novos arquivos e envio de áudio/vídeo
 não são expostos ao modelo; materiais fixos são colocados pelo operador no profile.
 Use `knowledge/` para referências de consulta e `media/` para a biblioteca de envio.

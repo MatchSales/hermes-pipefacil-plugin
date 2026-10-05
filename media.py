@@ -24,6 +24,15 @@ MEDIA_DOWNLOAD_TIMEOUT_SECONDS = 25.0
 INBOUND_CACHE_RETENTION_SECONDS = 24 * 3600
 _AUDIO_MIMES = {"audio/ogg", "audio/opus", "audio/mpeg", "audio/mp3", "audio/mp4", "audio/x-m4a",
                 "audio/aac", "audio/wav", "audio/x-wav", "audio/flac", "audio/webm"}
+
+
+def normalize_mime(value):
+    mime = str(value or "").split(";", 1)[0].strip().lower()
+    # Common object-storage aliases. Magic validation still requires the
+    # corresponding container: a real LATM stream cannot pass as an MP4 file.
+    return {"audio/x-flac": "audio/flac", "audio/x-wav": "audio/wav", "audio/mp3": "audio/mpeg",
+            "audio/m4a": "audio/mp4", "audio/x-m4a": "audio/mp4", "audio/mp4a-latm": "audio/mp4"}.get(mime, mime)
+
 _MEDIA_LIBRARY_LINE = re.compile(
     r"^\s*-\s*label:\s*(?P<label>[^|]+?)\s*\|\s*type:\s*"
     r"(?P<kind>image|document)\s*\|\s*url:\s*(?P<url>\S+)\s*$",
@@ -159,14 +168,14 @@ def _media_spec(message: dict[str, Any]) -> tuple[str, str, str, str] | InboundM
 
     download_url = media.get("downloadUrl") or media.get("download_url")
     filename = str(media.get("filename") or "").strip()
-    declared_mime = str(media.get("mimeType") or media.get("mime_type") or "").split(";", 1)[0].strip().lower()
+    declared_mime = normalize_mime(media.get("mimeType") or media.get("mime_type"))
     if not download_url:
         return InboundMediaResult(error="The current webhook media has no temporary download URL.")
     if not _safe_download_url(download_url):
         return InboundMediaResult(error="The current webhook media URL is invalid or not HTTPS.")
 
     if not declared_mime and filename:
-        declared_mime = mimetypes.guess_type(filename)[0] or ""
+        declared_mime = normalize_mime(mimetypes.guess_type(filename)[0])
     if declared_mime.startswith("image/") and declared_mime != "image/svg+xml":
         kind = "image"
     elif declared_mime in _AUDIO_MIMES:
@@ -192,6 +201,7 @@ def _clean_filename(value: str, mime_type: str) -> str:
 
 
 def _kind_for_mime(mime_type: str) -> str | None:
+    mime_type = normalize_mime(mime_type)
     if mime_type.startswith("image/") and mime_type != "image/svg+xml":
         return "image"
     if mime_type in _DOCUMENT_MIMES:
@@ -202,6 +212,7 @@ def _kind_for_mime(mime_type: str) -> str | None:
 
 
 def _valid_file_prefix(content: bytes, mime_type: str) -> bool:
+    mime_type = normalize_mime(mime_type)
     if mime_type in _AUDIO_MIMES:
         if mime_type in {"audio/ogg", "audio/opus"}:
             return content.startswith(b"OggS")
@@ -257,7 +268,7 @@ def _download_to_profile_cache(
                             return InboundMediaResult(error="media download exceeded the 25 MiB limit")
                     except ValueError:
                         return InboundMediaResult(error="media download returned an invalid content length")
-                response_mime = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+                response_mime = normalize_mime(response.headers.get("Content-Type", ""))
                 if response_mime in {"application/octet-stream", "binary/octet-stream", ""}:
                     mime_type = declared_mime
                 else:
