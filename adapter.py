@@ -246,7 +246,8 @@ class PipefacilAdapter(BasePlatformAdapter):
             raise ValueError("Unsupported Pipefacil writable_fields")
         self.crm = CRM(self, member_user_id=get_scoped_secret("PIPEFACIL_MEMBER_USER_ID", "") or extra.get("member_user_id", ""),
                        fields=fields, custom_fields=_list_setting(extra, "custom_fields", "PIPEFACIL_CUSTOM_FIELDS"),
-                       stages=_list_setting(extra, "stage_ids", "PIPEFACIL_STAGE_IDS"))
+                       stages=_list_setting(extra, "stage_ids", "PIPEFACIL_STAGE_IDS"),
+                       handoff_user_id=get_scoped_secret("PIPEFACIL_HANDOFF_USER_ID", "") or extra.get("handoff_user_id", ""))
         with _ADAPTERS_LOCK:
             _ADAPTERS_BY_PROFILE[str(self.profile_home)] = self
 
@@ -470,6 +471,13 @@ class PipefacilAdapter(BasePlatformAdapter):
             # send_private_notice. Only a live customer reply or our explicit /reset reply
             # may leave this adapter. Successful suppression prevents automatic retries.
             logger.info("[pipefacil] Suppressed gateway notice or reply outside a live customer turn")
+            return SendResult(success=True)
+        context = self._live_turn_context(chat_id)
+        terminal = self.state.handoff(context["job_id"]) if context is not None else None
+        if terminal and terminal["state"] in {"pending", "accepted", "uncertain"}:
+            # Closing text belongs BEFORE assignment. Successful suppression stops
+            # Hermes' automatic reply/fallback from writing after loss of access.
+            logger.info("[pipefacil] Suppressed reply after terminal handoff")
             return SendResult(success=True)
         if not content.strip():
             return SendResult(success=False, error="Refusing to send an empty Pipefacil message")

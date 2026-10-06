@@ -15,6 +15,7 @@ Ferramentas disponíveis para esta conversa:
 - pipefacil_read_profile_file: consulta de referências em knowledge/ e anexos do turno atual.
 - pipefacil_current_deal: leitura do negócio atual, campos e permissões.
 - pipefacil_update_deal: atualização dos campos permitidos do negócio atual.
+- pipefacil_handoff: conclui campos e etapa, envia encerramento e transfere ao responsável configurado.
 
 Quando o lead pedir uma apresentação, catálogo, foto, imagem, PDF ou outro arquivo para
 receber, consulte pipefacil_list_media antes de afirmar que não há material disponível.
@@ -28,9 +29,27 @@ O limite total é de duas mensagens adicionais por turno; a resposta final é en
 automaticamente. Para texto simples, escreva apenas a resposta final. Só informe que
 solicitou o envio depois do resultado positivo da ferramenta. Se textos já aceitos
 contiverem a resposta completa, use-os exatamente na resposta final para evitar duplicação.
+
+Para encaminhar ao humano, use pipefacil_handoff por último. Inclua em properties os
+campos e a etapa que ainda precisam ser gravados, e em message o encerramento dirigido ao
+cliente (por exemplo, que vai encaminhar o atendimento). O plugin confirma os campos antes
+de enviar essa mensagem e troca o responsável somente no final. O destino vem da configuração
+do profile. Não consulte o negócio, não atualize campos e não envie mensagens depois disso:
+a transferência pode retirar o acesso. A resposta final automática será suprimida após uma
+transferência confirmada ou incerta. Se o resultado for incerto, não repita nem declare sucesso;
+é necessária reconciliação pelo operador. Se o encerramento já foi enviado, omita message.
 """
 
 TOOL_DESCRIPTIONS = {
+    "pipefacil_handoff": (
+        "Complete the current deal and hand off to this profile's configured responsible user. "
+        "Pipefacil handoff, transferir atendimento, trocar responsável, encaminhar ao humano. "
+        "Use last: final allowed properties/stage are verified, then the optional closing message "
+        "is sent, then responsibility is transferred. No model-selected recipient or deal ID. "
+        "After accepted or uncertain transfer, no CRM reads, writes or messages are allowed in this turn. "
+        "The terminal PATCH receipt confirms transfer without a subsequent GET. "
+        "Do not retry uncertain outcomes or claim success on error."
+    ),
     "pipefacil_list_media": (
         "List approved images and documents for sending to this lead. "
         "Pipefacil media library: arquivos, imagens, fotos, documentos, PDF, catálogo, apresentação. "

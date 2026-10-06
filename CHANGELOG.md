@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.5
+
+- Add `pipefacil_handoff`: verify final allowed fields/stage, send the optional closing text, then transfer responsibility as the last mutation. The target is configured per profile with `PIPEFACIL_HANDOFF_USER_ID` (or `extra.handoff_user_id`); the model cannot select another lead or responsible user.
+- Confirm transfer from the terminal PATCH receipt without a GET after assignment. Persist the receipt, block subsequent CRM access/writes/messages in the turn, and suppress the automatic final answer after accepted or uncertain handoff. Ambiguous transfers require operator reconciliation, including HTTP errors at the assignment boundary.
+- Preserve uncertain outcomes when field PATCH succeeds but readback fails. Refuse handoff while any earlier action in the turn is pending or uncertain.
+
 ## 0.4.4
 
 - Silently ignore signed messages without an associated lead before queuing. Verify the lead and its contact through the API before any AI, history, media, admin or `/reset` handling, including jobs queued before the update.

@@ -1,10 +1,11 @@
 name: pipefacil-platform
 label: Pipefacil
 kind: platform
-version: 0.4.4
+version: 0.4.5
 description: Receives Pipefacil webhooks with current media, replies with text or allowlisted media, and updates deals.
 author: Hermes Pipefacil plugin contributors
 provides_tools:
+  - pipefacil_handoff
   - pipefacil_update_deal
   - pipefacil_read_profile_file
   - pipefacil_send_messages

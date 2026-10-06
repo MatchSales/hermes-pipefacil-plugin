@@ -45,6 +45,8 @@ def test_tool_schema_and_registration_descriptions_are_identical():
     ("pipefacil_send_messages", "pipefacil_send_messages"),
     ("pipefacil_current_deal", "pipefacil_current_deal"),
     ("pipefacil_update_deal", "pipefacil_update_deal"),
+    ("pipefacil_handoff", "pipefacil_handoff"),
+    ("pipefacil trocar responsável", "pipefacil_handoff"),
     ("pipefacil_read_profile_file", "pipefacil_read_profile_file"),
     ("pipefacil list media library", "pipefacil_list_media"),
     ("pipefacil current deal read observations", "pipefacil_current_deal"),
@@ -96,7 +98,7 @@ def test_health_reports_shared_revision_and_contract_even_when_state_unavailable
     response = asyncio.run(adapter._handle_health(None))
     body = json.loads(response.text)
     assert response.status == (503 if state_unavailable else 200)
-    assert body["pluginVersion"] == "0.4.4" and body["guidanceRevision"] == shared.SHARED_GUIDANCE_REVISION
+    assert body["pluginVersion"] == "0.4.5" and body["guidanceRevision"] == shared.SHARED_GUIDANCE_REVISION
     assert body["leadAdmissionRevision"] == "internal-contact-v2"
     assert body["capabilities"] == {"text": True, "crmTools": True, "inboundMedia": True, "outboundMedia": True}
     assert "TEST-SECRET" not in response.text

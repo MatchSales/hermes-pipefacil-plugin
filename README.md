@@ -236,6 +236,32 @@ Never-started jobs are recoverable; interrupted or ambiguous writes require oper
 See [HTTP architecture, limits, schemas and operations](docs/http-runtime.md) and
 [the Portuguese setup instructions](README.pt-BR.md). Native audio transcription requires a configured STT provider.
 
+### Ordered handoff (0.4.5)
+
+Set `PIPEFACIL_HANDOFF_USER_ID` (or `platforms.pipefacil.extra.handoff_user_id`) to this
+profile's human responsible **userId**. Handoff also requires `PIPEFACIL_MEMBER_USER_ID`;
+without a distinct configured target, the tool refuses to transfer.
+
+Use `pipefacil_handoff` as the last operation. Its optional `properties` use the same field,
+custom-field and stage allowlists as `pipefacil_update_deal`; won/lost stage changes are
+not allowed in handoff. The plugin verifies these fields first, sends the optional `message`
+to the current lead, then PATCHes only `responsibleUserId`. It confirms the returned deal's
+identity, contact, pipeline, stage and new owner using the PATCH receipt, without a subsequent
+GET that might fail after assignment revokes access.
+
+Accepted or uncertain handoff closes CRM access and further writes/sends for this turn,
+including the automatic final answer. Pass customer-facing closing text in `message`, or
+omit it if already sent. Use prospective wording, such as “I'll forward your request”; do
+not claim transfer before confirmation. A missing/invalid receipt or assignment HTTP failure
+requires operator reconciliation and is never automatically retried. Pending or uncertain
+prior actions prevent handoff. A repeated identical successful call returns its saved receipt.
+
+The plugin owns this ordering and safety contract. Profiles own destination IDs, allowed fields
+and stages, commercial criteria and wording. Client-specific business code can call the same
+handoff contract from a separate extension; it must replace its old reassignment path rather
+than wrapping the new tool with CRM writes after transfer. Existing custom forks require migration;
+updating this repository alone does not change those profiles.
+
 ### Automatic tool guidance (0.4.2)
 
 Each Pipefacil lead turn now carries a static, trusted `MessageEvent.channel_prompt` using
@@ -253,7 +279,7 @@ still supply the approved files and commercial rules.
 For deferred tools, describe the exact tool name, then invoke one local tool per `tool_call`.
 If searching is needed, query only the exact name with underscores. Hermes uses lexical
 search and can reject a query containing an intent word absent from all tool descriptions.
-All five tools now share their registration and schema descriptions, with Portuguese and
+All tools share their registration and schema descriptions, with Portuguese and
 English media/CRM terms to improve discovery.
 
 This is model guidance, not proof that every natural request works. After deployment, ask

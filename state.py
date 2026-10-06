@@ -61,6 +61,7 @@ class State:
             db.execute("CREATE INDEX IF NOT EXISTS jobs_pending ON jobs(state,chat,id)")
             db.execute("CREATE TABLE IF NOT EXISTS actions(key TEXT PRIMARY KEY, job INTEGER NOT NULL, kind TEXT NOT NULL, "
                        "state TEXT NOT NULL, result TEXT, updated REAL NOT NULL)")
+            db.execute("CREATE INDEX IF NOT EXISTS actions_job_kind_state ON actions(job,kind,state)")
             db.execute("CREATE TABLE IF NOT EXISTS uploads(key TEXT PRIMARY KEY, receipt TEXT NOT NULL, updated REAL NOT NULL)")
 
     @contextmanager
@@ -175,6 +176,10 @@ class State:
     def claim_action(self, job, kind, arguments):
         key = digest([kind, arguments] if kind == "upload" else [job, kind, arguments])
         with self.db() as db:
+            terminal = db.execute("SELECT key,state FROM actions WHERE job=? AND kind='handoff' LIMIT 1", (job,)).fetchone()
+            if terminal and (kind == "handoff" and terminal["key"] != key
+                             or kind != "handoff" and terminal["state"] in {"pending", "accepted", "uncertain"}):
+                raise StateError("handoff_is_terminal: no further writes or sends in this turn")
             old = db.execute("SELECT state,result FROM actions WHERE key=?", (key,)).fetchone()
             if old:
                 if old["state"] == "accepted":
@@ -184,11 +189,27 @@ class State:
                 # Native retry/Markdown fallback may change the arguments. An
                 # ambiguous send blocks all further sends in this exact turn.
                 raise StateError("prior_send_uncertain: operator reconciliation required; request was not repeated")
+            if kind == "handoff" and db.execute("SELECT 1 FROM actions WHERE job=? AND state IN ('pending','uncertain') LIMIT 1", (job,)).fetchone():
+                raise StateError("prior_action_uncertain: finish reconciliation before transferring the deal")
             active = db.execute("SELECT state FROM jobs WHERE id=?", (job,)).fetchone()
             if active is None or active[0] != "processing":
                 raise StateError("turn_is_no_longer_active")
             db.execute("INSERT INTO actions(key,job,kind,state,updated) VALUES (?,?,?,'pending',?)", (key, job, kind, time.time()))
             return key, None
+
+    def handoff(self, job):
+        """Durable terminal state, including a receipt that survives loss of CRM access."""
+        with self.db() as db:
+            row = db.execute("SELECT key,state,result FROM actions WHERE job=? AND kind='handoff' LIMIT 1", (job,)).fetchone()
+        if row is None:
+            return None
+        return {"key": row["key"], "state": row["state"],
+                "result": json.loads(row["result"]) if row["result"] else None}
+
+    def assert_handoff_ready(self, job):
+        with self.db() as db:
+            if db.execute("SELECT 1 FROM actions WHERE job=? AND state IN ('pending','uncertain') LIMIT 1", (job,)).fetchone():
+                raise StateError("prior_action_uncertain: finish reconciliation before preparing handoff")
 
     def finish_action(self, key, result=None, *, rejected=False):
         with self.db() as db:
@@ -223,6 +244,9 @@ class State:
                 expected = "key" if row["kind"] == "upload" else "message_id" if row["kind"] == "send" else "updated"
                 if not isinstance(result, dict) or not result.get(expected):
                     raise StateError("accepted_reconciliation_requires_verified_receipt")
+                if row["kind"] == "handoff" and (not result.get("handed_off") or not result.get("terminal")
+                                                  or not result.get("responsibleUserId") or not result.get("seq")):
+                    raise StateError("handoff_reconciliation_requires_verified_transfer_receipt")
             db.execute("CREATE TABLE IF NOT EXISTS reconciliations(action TEXT, outcome TEXT, evidence TEXT, at REAL)")
             db.execute("INSERT INTO reconciliations VALUES (?,?,?,?)", (key, outcome, evidence, time.time()))
             # 'not_performed' remains terminal. Reconciliation never re-runs an LLM
