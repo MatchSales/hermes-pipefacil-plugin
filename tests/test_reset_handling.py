@@ -146,6 +146,8 @@ def test_webhook_rejects_unsigned_or_invalid_signature_before_payload_validation
 def test_reset_confirmation_follows_session_cleanup_and_history_boundary(tmp_path, monkeypatch, outcome):
     adapter_module = _adapter_with_fake_gateway(monkeypatch)
     adapter = object.__new__(adapter_module.PipefacilAdapter)
+    adapter.api_base_url = "https://crm.example"
+    monkeypatch.setattr(adapter_module, "check_lead", lambda **kwargs: None)
     adapter.profile_home = tmp_path
     adapter._history_reset_lock = threading.RLock()
     adapter._pending_reset_purges = {"old-session": "pipefacil:lead"}
@@ -179,7 +181,7 @@ def test_reset_confirmation_follows_session_cleanup_and_history_boundary(tmp_pat
     adapter.purge_reset_session = lambda *args, **kwargs: False
 
     asyncio.run(adapter._process_event(
-        payload={"data": {}},
+        payload={"data": {"deal": {"seq": 1}}},
         messages=[{"id": "reset-1", "type": "text", "body": "/reset",
                    "timestamp": "2026-10-01T20:00:00Z"}],
         contact={"phone": "+5511999999999"}, channel={},
@@ -198,6 +200,8 @@ def test_reset_confirmation_follows_session_cleanup_and_history_boundary(tmp_pat
 def test_reset_from_public_lead_is_rejected_without_rotating_session(tmp_path, monkeypatch):
     adapter_module = _adapter_with_fake_gateway(monkeypatch)
     adapter = object.__new__(adapter_module.PipefacilAdapter)
+    adapter.api_base_url = "https://crm.example"
+    monkeypatch.setattr(adapter_module, "check_lead", lambda **kwargs: None)
     adapter.reset_allowed_users = set()
     sent = []
 
@@ -207,7 +211,7 @@ def test_reset_from_public_lead_is_rejected_without_rotating_session(tmp_path, m
     adapter._send_control_reply = send
     adapter._mark_session_for_reset_purge = lambda source: pytest.fail("public reset must be denied")
     asyncio.run(adapter._process_event(
-        payload={"data": {}},
+        payload={"data": {"deal": {"seq": 1}}},
         messages=[{"id": "reset-1", "type": "text", "body": "/reset"}],
         contact={"phone": "+5511999999999"}, channel={},
         chat_id="channel:+5511999999999", phone="+5511999999999",

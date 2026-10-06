@@ -41,6 +41,7 @@ from .security import AdmissionError, decode_body, verify, parse_json, ADMIN, AD
 from .state import State, StateError, Full, Conflict, digest
 from .library import read_asset
 from .crm import CRM
+from .lead_gate import LEAD_GATE_REVISION, event_deal_seq, check_lead
 from .guidance import PIPEFACIL_CHANNEL_PROMPT
 from .shared_guidance import SHARED_GUIDANCE_REVISION
 from . import __version__
@@ -494,6 +495,7 @@ class PipefacilAdapter(BasePlatformAdapter):
     async def _handle_health(self, request):
         from aiohttp import web
         contract = {"pluginVersion": __version__, "guidanceRevision": SHARED_GUIDANCE_REVISION,
+                    "leadAdmissionRevision": LEAD_GATE_REVISION,
                     "capabilities": {"text": True, "crmTools": True, "inboundMedia": True, "outboundMedia": True}}
         try:
             state = await asyncio.to_thread(self.state.status)
@@ -531,6 +533,9 @@ class PipefacilAdapter(BasePlatformAdapter):
             data = payload.get("data")
             if not isinstance(data, dict):
                 return web.json_response({"error": "missing event data"}, status=422)
+            if event_deal_seq(payload) is None:
+                logger.info("[pipefacil] Ignored incoming contact without an associated lead")
+                return web.json_response({"status": "ignored", "reason": "no_associated_lead"}, status=200)
             channel = data.get("channel") if isinstance(data.get("channel"), dict) else {}
             contact = data.get("contact") if isinstance(data.get("contact"), dict) else {}
             phone = str(contact.get("phone") or "").strip()
@@ -656,6 +661,30 @@ class PipefacilAdapter(BasePlatformAdapter):
         deal = payload.get("data", {}).get("deal")
         deal = deal if isinstance(deal, dict) else {}
         seq = deal.get("seq")
+        # Recheck queued jobs too, before reset/admin replies, history or media.
+        seq = event_deal_seq(payload)
+        if seq is None:
+            logger.info("[pipefacil] Ignored queued contact without an associated lead")
+            return
+        try:
+            for attempt in range(3):
+                try:
+                    ignore_reason = await asyncio.to_thread(
+                        check_lead, api_key=key, base_url=self.api_base_url, seq=seq, contact=contact,
+                    )
+                    break
+                except PipefacilAPIError as exc:
+                    transient = exc.status_code is None or exc.status_code == 429 or exc.status_code >= 500
+                    if attempt == 2 or not transient:
+                        raise
+                    await asyncio.sleep(0.35 * (attempt + 1))
+        except PipefacilAPIError as exc:
+            logger.warning("[pipefacil] Lead verification unavailable (HTTP %s); suppressed response",
+                           exc.status_code or "transport/invalid_response")
+            raise
+        if ignore_reason:
+            logger.info("[pipefacil] Suppressed response: %s", ignore_reason)
+            return
         reset_index = _reset_command_index(messages)
         if reset_index is not None:
             if re.sub(r"\D", "", phone) not in self.reset_allowed_users:

@@ -34,6 +34,7 @@ def adapter(home, monkeypatch, *, capacity=500, concurrency=4, timeout=30):
     monkeypatch.setattr(value, "_acquire_platform_lock", lambda *a: True)
     monkeypatch.setattr(value, "_release_platform_lock", lambda: None)
     monkeypatch.setattr(_modules()[0], "fetch_conversation_history", lambda **k: ([], False))
+    monkeypatch.setattr(_modules()[0], "check_lead", lambda **k: None)
     async def no_obligation(*args):
         return None
     monkeypatch.setattr(value, "_record_delivery_obligation", no_obligation)
@@ -50,8 +51,32 @@ async def listener(app):
 
 def payload(identity="one", *, phone="+12025550191", body="oi"):
     return json.dumps({"type": "message.received", "data": {"channel": {"id": "channel"},
+        "deal": {"seq": 1},
         "contact": {"id": "contact", "phone": phone}, "messages": [{"id": identity, "type": "text", "body": body,
             "timestamp": int(time.time() * 1000)}]}}, ensure_ascii=False).encode()
+
+
+def test_failed_lead_verification_is_journaled_as_failed_not_completed(tmp_path, monkeypatch):
+    value = adapter(tmp_path / "verification-failure", monkeypatch)
+    adapter_module = _modules()[0]
+    def fail_lookup(**kwargs):
+        raise adapter_module.PipefacilAPIError("synthetic permission failure", status_code=403)
+    monkeypatch.setattr(adapter_module, "check_lead", fail_lookup)
+    async def forbidden(*args, **kwargs):
+        pytest.fail("failed verification must never dispatch a model or send a message")
+    value.handle_message = forbidden
+    value.send_api_message = forbidden
+    data = json.loads(payload())["data"]
+    async def scenario():
+        value.state.admit({"payload": {"data": data}, "messages": data["messages"],
+            "contact": data["contact"], "channel": data["channel"], "phone": data["contact"]["phone"],
+            "chat_id": "channel:test"}, now=time.time(), max_age=300)
+        await value._drain("channel:test")
+        assert value.state.status()["jobs"] == {"failed": 1}
+    try:
+        asyncio.run(scenario())
+    finally:
+        value.state.close()
 
 
 async def drain(value):
