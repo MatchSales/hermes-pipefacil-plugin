@@ -138,6 +138,14 @@ agent:
 The wildcard allowlist permits lead identities from authenticated backend events. The backend selects
 eligible agent/conversation events; the adapter verifies their origin. Use HTTPS at the public ingress.
 
+Signed messages without a positive `data.deal.seq` are acknowledged with HTTP 200
+and `status: ignored`, before admission to the queue. Before processing, the plugin
+fetches that lead and verifies its contact ID and phone. A missing lead (404) or a
+contact mismatch produces no reply, including for `/reset`, admin requests and
+audio. Failed API verification also suppresses replies, with a separate operational
+log; it is not classified as an internal contact. No model instruction can bypass
+this check. Health reports `leadAdmissionRevision: internal-contact-v1`.
+
 ### Replay protection
 
 Messages must have an original `timestamp` with a timezone (or a numeric Unix timestamp in seconds

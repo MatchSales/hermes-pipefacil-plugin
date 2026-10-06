@@ -15,6 +15,8 @@ import pytest
 
 from test_gateway_sessions import _modules
 
+_DEFAULT_DEAL = object()
+
 
 def _adapter(home):
     module, _ = _modules()
@@ -44,9 +46,10 @@ def _message(message_id="new", age=0, body="oi"):
             "timestamp": datetime.fromtimestamp(time.time() - age, timezone.utc).isoformat()}
 
 
-async def _post(adapter, messages, channel="channel"):
+async def _post(adapter, messages, channel="channel", *, deal=_DEFAULT_DEAL):
     data = json.dumps({"type": "message.received", "data": {
         "channel": {"id": channel}, "contact": {"phone": "+5511999999999"}, "messages": messages,
+        "deal": {"seq": 1} if deal is _DEFAULT_DEAL else deal,
     }}).encode()
     class Request:
         content_length = len(data)

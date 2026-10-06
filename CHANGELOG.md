@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.4
+
+- Silently ignore signed messages without an associated lead before queuing. Verify the lead and its contact through the API before any AI, history, media, admin or `/reset` handling, including jobs queued before the update.
+- Suppress replies on missing leads, contact mismatches and failed verification. Log API failures separately from definite 404s. Expose `leadAdmissionRevision` in health for fleet verification.
+
 ## 0.4.1
 
 - Decode compressed CRM API responses once. Preserve HTTP errors and the 2 MiB decompressed response limit. Fix gzip/deflate history and upload responses being incorrectly reported as network failures.

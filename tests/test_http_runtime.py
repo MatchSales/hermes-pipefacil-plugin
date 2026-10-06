@@ -34,6 +34,7 @@ def adapter(home, monkeypatch, *, capacity=500, concurrency=4, timeout=30):
     monkeypatch.setattr(value, "_acquire_platform_lock", lambda *a: True)
     monkeypatch.setattr(value, "_release_platform_lock", lambda: None)
     monkeypatch.setattr(_modules()[0], "fetch_conversation_history", lambda **k: ([], False))
+    monkeypatch.setattr(_modules()[0], "check_lead", lambda **k: None)
     async def no_obligation(*args):
         return None
     monkeypatch.setattr(value, "_record_delivery_obligation", no_obligation)
@@ -50,6 +51,7 @@ async def listener(app):
 
 def payload(identity="one", *, phone="+12025550191", body="oi"):
     return json.dumps({"type": "message.received", "data": {"channel": {"id": "channel"},
+        "deal": {"seq": 1},
         "contact": {"id": "contact", "phone": phone}, "messages": [{"id": identity, "type": "text", "body": body,
             "timestamp": int(time.time() * 1000)}]}}, ensure_ascii=False).encode()
 

@@ -256,6 +256,7 @@ def test_current_webhook_media_reaches_native_hermes_event_and_failures_are_expl
     adapter.handle_message = capture_event
     monkeypatch.setattr(adapter_module, "get_scoped_secret", lambda *args: "profile-key")
     monkeypatch.setattr(adapter_module, "fetch_conversation_history", lambda **kwargs: ([], False))
+    monkeypatch.setattr(adapter_module, "check_lead", lambda **kwargs: None)
     monkeypatch.setattr(media.httpx, "Client", _FakeHTTPClient)
     _FakeHTTPClient.response = _FakeResponse(200, mime, body)
 
@@ -270,7 +271,7 @@ def test_current_webhook_media_reaches_native_hermes_event_and_failures_are_expl
         },
     }
     asyncio.run(adapter._process_event(
-        payload={"data": {}}, messages=[message], contact={"name": "Lead", "phone": "+5511999999999"},
+        payload={"data": {"deal": {"seq": 1}}}, messages=[message], contact={"name": "Lead", "phone": "+5511999999999"},
         channel={}, chat_id="channel-1:+5511999999999", phone="+5511999999999",
     ))
     event = captured[-1]
@@ -283,7 +284,7 @@ def test_current_webhook_media_reaches_native_hermes_event_and_failures_are_expl
     _FakeHTTPClient.response = _FakeResponse(403, "application/json", b"expired")
     failed_message = {**message, "id": "current-expired"}
     asyncio.run(adapter._process_event(
-        payload={"data": {}}, messages=[failed_message], contact={"name": "Lead", "phone": "+5511999999999"},
+        payload={"data": {"deal": {"seq": 1}}}, messages=[failed_message], contact={"name": "Lead", "phone": "+5511999999999"},
         channel={}, chat_id="channel-1:+5511999999999", phone="+5511999999999",
     ))
     failed_event = captured[-1]
