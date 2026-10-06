@@ -171,20 +171,9 @@ class CRM:
 
     def transfer_handoff(self, context, key, prepared, properties, arguments, active):
         def write():
-            # Confirm using the PATCH receipt: assignment may revoke GET access.
-            target = arguments["responsibleUserId"]
-            try:
-                envelope = api.update_deal(api_key=key, base_url=self.adapter.api_base_url,
-                                           seq=prepared["seq"], properties={"responsibleUserId": target})
-            except api.PipefacilAPIError as exc:
-                # Even a 404 at this boundary may reflect lost visibility. Do not
-                # turn it into permission to send again or try another assignment.
-                raise api.PipefacilAPIError("Handoff outcome is uncertain; operator reconciliation required: " + str(exc)) from None
-            receipt = envelope.get("data") if isinstance(envelope, dict) else None
-            expected = {**prepared, "responsibleUserId": target, "status": "open"}
-            if (not isinstance(receipt, dict) or envelope.get("success") is False or receipt.get("success") is False
-                    or any(receipt.get(k) != v for k, v in expected.items())):
-                raise api.PipefacilAPIError("Handoff receipt is uncertain; operator reconciliation required.")
+            from .handoff import transfer_responsibility
+            expected = transfer_responsibility(api_key=key, base_url=self.adapter.api_base_url,
+                                               expected=prepared, responsible_user_id=arguments["responsibleUserId"])
             return {"success": True, "updated": True, "handed_off": True, "terminal": True,
                     **expected, "updated_fields": sorted(properties)}
 

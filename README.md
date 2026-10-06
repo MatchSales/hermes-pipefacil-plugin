@@ -349,3 +349,9 @@ visibility does not grant reuse rights.
 As orientações comuns têm revisão e fonte compartilhadas com o Kafka 0.1.1. Consulte
 [o contrato de compatibilidade e atualização coordenada](docs/plugin-parity.md).
 O health informa versão, revisão e capacidades. Os nomes e limites específicos de mídia permanecem próprios deste canal.
+
+## Profile-owned business extensions (0.4.6)
+
+Keep client code in a separate native plugin and declare it in `extra.extension_plugins`.
+The shared core checks required dependencies and scoped tool/lifecycle contracts. See
+[extension API revision 1](docs/extensions.md) for configuration, ordered handoff and stored audio.

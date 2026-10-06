@@ -260,6 +260,13 @@ comerciais e texto pertencem à configuração/instruções de cada profile. Có
 pode chamar esse contrato a partir de uma extensão separada. Os forks existentes precisam substituir
 seus fluxos antigos de transferência; atualizar este repositório não migra esses profiles automaticamente.
 
+### Código específico de cada SDR (0.4.6)
+
+Instale o código particular em um plugin nativo separado, com configurações em
+`plugins.entries.<plugin>.settings`. Declare-o em `extra.extension_plugins` e use seu próprio
+toolset. A base exige a extensão e disponibiliza a interface de handoff, mídia, autorização
+e ciclo de vida por profile. Veja o [contrato de extensões](docs/extensions.md).
+
 ### Biblioteca de mídia do profile
 
 Cadastre cada link HTTPS que o agente pode compartilhar no `SOUL.md` do próprio profile. Uma entrada deve
