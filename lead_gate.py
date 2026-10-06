@@ -5,7 +5,7 @@ import re
 
 from . import api
 
-LEAD_GATE_REVISION = "internal-contact-v1"
+LEAD_GATE_REVISION = "internal-contact-v2"
 
 
 def event_deal_seq(payload):
@@ -39,7 +39,7 @@ def check_lead(*, api_key, base_url, seq, contact):
     owner = lead.get("contact")
     if not isinstance(owner, dict) or not owner.get("id"):
         return "lead_contact_mismatch"
-    if contact.get("id") and owner["id"] != contact["id"]:
+    if not contact.get("id") or owner["id"] != contact["id"]:
         return "lead_contact_mismatch"
     def phone(value):
         return re.sub(r"\D", "", str(value or ""))

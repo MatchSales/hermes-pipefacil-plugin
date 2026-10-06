@@ -144,7 +144,9 @@ fetches that lead and verifies its contact ID and phone. A missing lead (404) or
 contact mismatch produces no reply, including for `/reset`, admin requests and
 audio. Failed API verification also suppresses replies, with a separate operational
 log; it is not classified as an internal contact. No model instruction can bypass
-this check. Health reports `leadAdmissionRevision: internal-contact-v1`.
+this check. Transient verification errors receive three bounded attempts; an
+exhausted check fails the private job instead of marking it completed. Health
+reports `leadAdmissionRevision: internal-contact-v2`.
 
 ### Replay protection
 

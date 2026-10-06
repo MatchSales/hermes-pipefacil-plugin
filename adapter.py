@@ -533,15 +533,14 @@ class PipefacilAdapter(BasePlatformAdapter):
             data = payload.get("data")
             if not isinstance(data, dict):
                 return web.json_response({"error": "missing event data"}, status=422)
+            if event_deal_seq(payload) is None:
+                logger.info("[pipefacil] Ignored incoming contact without an associated lead")
+                return web.json_response({"status": "ignored", "reason": "no_associated_lead"}, status=200)
             channel = data.get("channel") if isinstance(data.get("channel"), dict) else {}
             contact = data.get("contact") if isinstance(data.get("contact"), dict) else {}
             phone = str(contact.get("phone") or "").strip()
             if not phone:
                 return web.json_response({"error": "contact phone is required"}, status=422)
-
-            if event_deal_seq(payload) is None:
-                logger.info("[pipefacil] Ignored incoming contact without an associated lead")
-                return web.json_response({"status": "ignored", "reason": "no_associated_lead"}, status=200)
 
             raw_messages = data.get("messages")
             if not isinstance(raw_messages, list) or not raw_messages:
@@ -668,13 +667,21 @@ class PipefacilAdapter(BasePlatformAdapter):
             logger.info("[pipefacil] Ignored queued contact without an associated lead")
             return
         try:
-            ignore_reason = await asyncio.to_thread(
-                check_lead, api_key=key, base_url=self.api_base_url, seq=seq, contact=contact,
-            )
+            for attempt in range(3):
+                try:
+                    ignore_reason = await asyncio.to_thread(
+                        check_lead, api_key=key, base_url=self.api_base_url, seq=seq, contact=contact,
+                    )
+                    break
+                except PipefacilAPIError as exc:
+                    transient = exc.status_code is None or exc.status_code == 429 or exc.status_code >= 500
+                    if attempt == 2 or not transient:
+                        raise
+                    await asyncio.sleep(0.35 * (attempt + 1))
         except PipefacilAPIError as exc:
             logger.warning("[pipefacil] Lead verification unavailable (HTTP %s); suppressed response",
                            exc.status_code or "transport/invalid_response")
-            return
+            raise
         if ignore_reason:
             logger.info("[pipefacil] Suppressed response: %s", ignore_reason)
             return

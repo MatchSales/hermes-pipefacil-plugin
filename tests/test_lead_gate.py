@@ -1,5 +1,6 @@
 """Internal contacts never reach AI, media, history or gateway control replies."""
 import asyncio
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -64,12 +65,18 @@ def test_queued_events_fail_closed_before_any_customer_effect(monkeypatch, body,
         owner["id" if outcome == "wrong_contact" else "phone"] = "other"
         return {"data": {"seq": 42, "contact": owner}}
     monkeypatch.setattr(gate.api, "request_json", lookup)
-    asyncio.run(adapter._process_event(
-        payload={"data": {} if outcome == "missing" else {"deal": {"seq": 42}}},
-        messages=[{"id": "one", "type": kind, "body": body, "media": {"downloadUrl": "https://example.org/audio"}}],
-        contact=contact, channel={}, chat_id="channel:test", phone=contact["phone"],
-    ))
-    assert requests == ([] if outcome == "missing" else ["/api/v1/deals/42"])
+    async def no_pause(seconds):
+        return None
+    monkeypatch.setattr(adapter_module.asyncio, "sleep", no_pause)
+    failed = outcome in {"401", "403", "429", "503", "transport", "invalid"}
+    with pytest.raises(gate.api.PipefacilAPIError) if failed else contextlib.nullcontext():
+        asyncio.run(adapter._process_event(
+            payload={"data": {} if outcome == "missing" else {"deal": {"seq": 42}}},
+            messages=[{"id": "one", "type": kind, "body": body, "media": {"downloadUrl": "https://example.org/audio"}}],
+            contact=contact, channel={}, chat_id="channel:test", phone=contact["phone"],
+        ))
+    attempts = 0 if outcome == "missing" else 3 if outcome in {"429", "503", "transport", "invalid"} else 1
+    assert requests == ["/api/v1/deals/42"] * attempts
     if outcome == "404":
         assert "verification unavailable" not in caplog.text
     elif outcome in {"401", "403", "429", "503", "transport", "invalid"}:
@@ -86,3 +93,37 @@ def test_valid_lead_and_phone_formatting_pass_the_api_guard(monkeypatch):
     monkeypatch.setattr(gate.api, "request_json", lookup)
     assert gate.check_lead(api_key="scoped-key", base_url="https://crm.example", seq=42, contact=contact) is None
     assert calls == [{"api_key": "scoped-key", "base_url": "https://crm.example", "method": "GET", "path": "/api/v1/deals/42"}]
+
+
+@pytest.mark.parametrize("identity", [None, "", False, "different"])
+def test_matching_phone_never_substitutes_for_contact_identity(monkeypatch, identity):
+    gate = module("lead_gate")
+    monkeypatch.setattr(gate.api, "request_json", lambda **kwargs: {"data": {
+        "seq": 1, "contact": {"id": "contact", "phone": "5511999999999"}}})
+    assert gate.check_lead(api_key="key", base_url="https://crm.example", seq=1,
+                           contact={"id": identity, "phone": "5511999999999"}) == "lead_contact_mismatch"
+
+
+def test_temporary_lookup_failure_recovers_before_control_reply(monkeypatch):
+    adapter_module = _adapter_with_fake_gateway(monkeypatch)
+    gate = __import__(adapter_module.__package__ + ".lead_gate", fromlist=["*"])
+    adapter = object.__new__(adapter_module.PipefacilAdapter)
+    adapter.api_base_url = "https://crm.example"
+    adapter.reset_allowed_users = set()
+    calls, sent = [], []
+    async def no_pause(seconds):
+        return None
+    async def reply(chat_id, body):
+        sent.append(body)
+    def lookup(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise gate.api.PipefacilAPIError("temporary", status_code=503)
+        return {"data": {"seq": 1, "contact": {"id": "contact", "phone": "5511999999999"}}}
+    adapter._send_control_reply = reply
+    monkeypatch.setattr(gate.api, "request_json", lookup)
+    monkeypatch.setattr(adapter_module.asyncio, "sleep", no_pause)
+    asyncio.run(adapter._process_event(payload={"data": {"deal": {"seq": 1}}},
+        messages=[{"body": "/reset", "type": "text"}], contact={"id": "contact", "phone": "5511999999999"},
+        channel={}, chat_id="test", phone="5511999999999"))
+    assert len(calls) == 2 and sent == ["Comando não disponível neste atendimento."]

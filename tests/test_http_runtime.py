@@ -56,6 +56,29 @@ def payload(identity="one", *, phone="+12025550191", body="oi"):
             "timestamp": int(time.time() * 1000)}]}}, ensure_ascii=False).encode()
 
 
+def test_failed_lead_verification_is_journaled_as_failed_not_completed(tmp_path, monkeypatch):
+    value = adapter(tmp_path / "verification-failure", monkeypatch)
+    adapter_module = _modules()[0]
+    def fail_lookup(**kwargs):
+        raise adapter_module.PipefacilAPIError("synthetic permission failure", status_code=403)
+    monkeypatch.setattr(adapter_module, "check_lead", fail_lookup)
+    async def forbidden(*args, **kwargs):
+        pytest.fail("failed verification must never dispatch a model or send a message")
+    value.handle_message = forbidden
+    value.send_api_message = forbidden
+    data = json.loads(payload())["data"]
+    async def scenario():
+        value.state.admit({"payload": {"data": data}, "messages": data["messages"],
+            "contact": data["contact"], "channel": data["channel"], "phone": data["contact"]["phone"],
+            "chat_id": "channel:test"}, now=time.time(), max_age=300)
+        await value._drain("channel:test")
+        assert value.state.status()["jobs"] == {"failed": 1}
+    try:
+        asyncio.run(scenario())
+    finally:
+        value.state.close()
+
+
 async def drain(value):
     while value._inbound_tasks:
         await asyncio.gather(*list(value._inbound_tasks))
