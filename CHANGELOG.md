@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.6
+
+- Add revision 1 of profile-owned extensions through native scoped Hermes hooks: required dependencies, lifecycle callbacks, owned toolsets, optional disabling of common tools, and health metadata. Missing or incompatible extensions fail closed.
+- Expose a scoped extension API so business plugins reuse shared routing, authorization, effects, media, and ordered handoff without importing loader namespaces or copying the platform core.
+- Add journal-bound stored audio delivery; speech providers remain outside the shared plugin. Extract a shared terminal owner-PATCH primitive for separately reserved business outboxes.
+- Document the boundary between the shared plugin, templates, profile settings, and private business code.
+
 ## 0.4.5
 
 - Add `pipefacil_handoff`: verify final allowed fields/stage, send the optional closing text, then transfer responsibility as the last mutation. The target is configured per profile with `PIPEFACIL_HANDOFF_USER_ID` (or `extra.handoff_user_id`); the model cannot select another lead or responsible user.

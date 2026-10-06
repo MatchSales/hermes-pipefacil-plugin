@@ -82,7 +82,7 @@ def request_json(
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key.strip()}",
-        "User-Agent": "hermes-pipefacil-plugin/0.4.5",
+        "User-Agent": "hermes-pipefacil-plugin/0.4.6",
     }
     try:
         with httpx.Client(timeout=API_TIMEOUT_SECONDS, follow_redirects=False, trust_env=False) as client:
@@ -165,7 +165,7 @@ def send_message(
     sender_phone_number_id: str | None = None,
 ) -> dict[str, Any]:
     """Send a public API text, image, or document message to one trusted destination."""
-    if message_type not in {"text", "image", "document"}:
+    if message_type not in {"text", "image", "document", "audio"}:
         raise PipefacilAPIError("Unsupported Pipefacil message type.")
     body: dict[str, Any] = {"to": recipient, "type": message_type}
     if message_type == "text":

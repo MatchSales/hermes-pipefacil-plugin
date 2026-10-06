@@ -7,6 +7,32 @@ from .api import PipefacilAPIError
 from .state import digest
 
 
+def transfer_responsibility(*, api_key, base_url, expected, responsible_user_id):
+    """Shared last-write primitive for a live turn or a separately journaled business outbox.
+
+    The caller must authorize the current lead and durably reserve the attempt first.
+    This primitive performs only the final owner PATCH, verifies its receipt, and never GETs.
+    """
+    from . import api
+
+    if (set(expected) != {"seq", "contactId", "pipelineId", "stageId"}
+            or type(expected["seq"]) is not int or expected["seq"] <= 0
+            or any(not isinstance(expected[k], str) or not expected[k] for k in ("contactId", "pipelineId", "stageId"))
+            or not isinstance(responsible_user_id, str) or not responsible_user_id):
+        raise ValueError("Transfer requires a verified lead identity and an operator-configured responsible user.")
+    try:
+        envelope = api.update_deal(api_key=api_key, base_url=base_url, seq=expected["seq"],
+                                   properties={"responsibleUserId": responsible_user_id})
+    except PipefacilAPIError as exc:
+        raise PipefacilAPIError("Handoff outcome is uncertain; operator reconciliation required: " + str(exc)) from None
+    receipt = envelope.get("data") if isinstance(envelope, dict) else None
+    verified = {**expected, "responsibleUserId": responsible_user_id, "status": "open"}
+    if (not isinstance(receipt, dict) or envelope.get("success") is False or receipt.get("success") is False
+            or any(receipt.get(k) != v for k, v in verified.items())):
+        raise PipefacilAPIError("Handoff receipt is uncertain; operator reconciliation required.")
+    return verified
+
+
 async def execute(adapter, chat_id, context, key, args, active):
     if not isinstance(args, dict) or set(args) - {"properties", "message"}:
         raise ValueError("Handoff accepts only final properties and an optional closing message.")

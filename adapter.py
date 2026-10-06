@@ -41,6 +41,8 @@ from .security import AdmissionError, decode_body, verify, parse_json, ADMIN, AD
 from .state import State, StateError, Full, Conflict, digest
 from .library import read_asset
 from .crm import CRM
+from .extensions import Extensions, ExtensionError, API_REVISION
+from .public import StoredAudio
 from .lead_gate import LEAD_GATE_REVISION, event_deal_seq, check_lead
 from .guidance import PIPEFACIL_CHANNEL_PROMPT
 from .shared_guidance import SHARED_GUIDANCE_REVISION
@@ -215,6 +217,7 @@ class PipefacilAdapter(BasePlatformAdapter):
         self.reset_allowed_users.discard("")
         from hermes_constants import get_hermes_home
         self.profile_home = Path(get_hermes_home()).resolve()
+        self.extensions = Extensions(self.profile_home, extra.get("extension_plugins", []))
         self._app = None
         self._runner = None
         self._inbound_tasks: set[asyncio.Task] = set()
@@ -308,6 +311,14 @@ class PipefacilAdapter(BasePlatformAdapter):
             self.state.close()
             return self._fail("bind_failed", f"Could not bind Pipefacil webhook on {self.host}:{self.port}: {exc}")
 
+        try:
+            from .policy import NAMES
+            self.extensions.tool_names(NAMES)
+            await self._extension_call("connect", adapter=self)
+        except Exception:
+            logger.exception("[pipefacil] Required profile extension failed to connect")
+            await self.disconnect()
+            return self._fail("extension_unavailable", "A required profile extension could not start")
         self._mark_connected()
         self._closing = False
         for chat in pending_chats:
@@ -325,6 +336,10 @@ class PipefacilAdapter(BasePlatformAdapter):
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._inbound_tasks.clear()
+        try:
+            await self._extension_call("disconnect", adapter=self)
+        except Exception:
+            logger.exception("[pipefacil] Profile extension shutdown failed")
         if self._runner is not None:
             with contextlib.suppress(Exception):
                 await self._runner.cleanup()
@@ -361,6 +376,13 @@ class PipefacilAdapter(BasePlatformAdapter):
                 self.state.finish_action(identity, rejected=rejected)
                 raise
 
+    async def _extension_call(self, hook, **kwargs):
+        extensions = getattr(self, "extensions", None)
+        if extensions is None or not extensions.names:
+            return []
+        with self._runtime_scope():
+            return await extensions.call(hook, **kwargs)
+
     async def send_api_message(self, chat_id: str, message: dict[str, Any]) -> dict[str, Any]:
         context = self._live_turn_context(chat_id)
         ingress = _INGRESS_JOB.get()
@@ -380,13 +402,27 @@ class PipefacilAdapter(BasePlatformAdapter):
         if not destination.get("phone"):
             raise PipefacilAPIError("No active Pipefacil webhook destination for this conversation.")
         message = dict(message)
+        if context is None and message.get("type") == "audio":
+            raise PipefacilAPIError("Audio requires an active lead turn.")
+        stored = message.pop("_stored_audio", None)
         with self._runtime_scope():
             key = get_scoped_secret("PIPEFACIL_API_KEY", "") or ""
             secrets = (key, self.webhook_secret, self.webhook_secret_next, get_scoped_secret("OPENAI_API_KEY", ""))
         if message.get("type") == "text":
+            if getattr(self, "extensions", None) is not None:
+                try:
+                    message["text"] = self.extensions.format_text(message.get("text"), adapter=self, context=context)
+                except ExtensionError as exc:
+                    raise PipefacilAPIError(str(exc), definite_rejection=True) from None
             message["text"] = public_text(message.get("text"), secrets)
             if len(message["text"]) > 4000:
                 raise PipefacilAPIError("Text message exceeds 4000 characters.")
+        elif message.get("type") == "audio":
+            if (not isinstance(stored, StoredAudio) or context is None
+                    or stored.profile_home != str(self.profile_home) or stored.job_id != job
+                    or not stored.storage_key or not stored.content_digest):
+                raise PipefacilAPIError("Audio requires a profile-bound extension upload receipt.")
+            message["contentDigest"] = stored.content_digest
         elif message.get("type") in {"image", "document"}:
             if not message.get("mediaLink") and not message.get("fileId"):
                 raise PipefacilAPIError("Media requires an approved library entry.")
@@ -404,6 +440,8 @@ class PipefacilAdapter(BasePlatformAdapter):
                     raise PipefacilAPIError("The approved profile file is unavailable or invalid.", definite_rejection=True) from None
             if context is not None and context.get("deal_seq") and self.crm.member_user_id:
                 self.crm.authorized(context, key)
+            if getattr(self, "extensions", None) is not None:
+                self.extensions.before_send(adapter=self, context=context, message=dict(message))
             arguments = {**message, "destination": destination}
             if asset_data:
                 arguments["contentDigest"] = asset_data[2]
@@ -412,6 +450,8 @@ class PipefacilAdapter(BasePlatformAdapter):
                 try:
                     media_link = message.get("mediaLink")
                     filename, mime = message.get("filename"), message.get("mimeType")
+                    if stored is not None:
+                        media_link = media_url(api_key=key, base_url=self.api_base_url, storage_key=stored.storage_key)
                     if asset_data:
                         asset, body, content_hash = asset_data
                         cache_key = digest([str(self.profile_home), self.api_base_url, hashlib.sha256(key.encode()).hexdigest(), content_hash])
@@ -428,7 +468,9 @@ class PipefacilAdapter(BasePlatformAdapter):
                     # receive a new agent message based on the earlier ownership check.
                     if context is not None and context.get("deal_seq") and self.crm.member_user_id:
                         self.crm.authorized(context, key)
-                except (PipefacilAPIError, OSError, ValueError) as exc:
+                    if getattr(self, "extensions", None) is not None:
+                        self.extensions.before_send(adapter=self, context=context, message=dict(message))
+                except (PipefacilAPIError, ExtensionError, OSError, ValueError) as exc:
                     # No message POST has happened. Keep an uncertain upload in its
                     # own journal, but allow a truthful text reply about the failure.
                     raise PipefacilAPIError(str(exc), definite_rejection=True) from None
@@ -454,7 +496,7 @@ class PipefacilAdapter(BasePlatformAdapter):
 
         try:
             return await asyncio.to_thread(deliver)
-        except (ValueError, StateError) as exc:
+        except (ValueError, ExtensionError, StateError) as exc:
             raise PipefacilAPIError(str(exc)) from None
 
     async def send(
@@ -484,6 +526,8 @@ class PipefacilAdapter(BasePlatformAdapter):
         if metadata and metadata.get("notify"):
             reused = self._reused_final_delivery(chat_id, content)
             if reused is not None:
+                if context is not None:
+                    context["final_response_sent"] = True
                 logger.info("[pipefacil] Final text already accepted in this turn's preliminary messages; skipped duplicate")
                 return SendResult(success=True, message_id=reused.get("message_id"))
         try:
@@ -491,6 +535,8 @@ class PipefacilAdapter(BasePlatformAdapter):
         except PipefacilAPIError as exc:
             logger.warning("[pipefacil] Message delivery failed (HTTP %s): %s", exc.status_code or "transport", exc)
             return SendResult(success=False, error=str(exc))
+        if live_reply and context is not None:
+            context["final_response_sent"] = True
         return SendResult(success=True, message_id=result["message_id"])
 
     async def _send_control_reply(self, chat_id: str, content: str) -> SendResult:
@@ -503,9 +549,11 @@ class PipefacilAdapter(BasePlatformAdapter):
     async def _handle_health(self, request):
         from aiohttp import web
         contract = {"pluginVersion": __version__, "guidanceRevision": SHARED_GUIDANCE_REVISION,
-                    "leadAdmissionRevision": LEAD_GATE_REVISION,
+                    "leadAdmissionRevision": LEAD_GATE_REVISION, "extensionApiRevision": API_REVISION,
                     "capabilities": {"text": True, "crmTools": True, "inboundMedia": True, "outboundMedia": True}}
         try:
+            extensions = getattr(self, "extensions", None)
+            contract["extensions"] = extensions.metadata() if extensions is not None else []
             state = await asyncio.to_thread(self.state.status)
             ready = not self._closing and self._ready_error is None and bool(self.webhook_secret) and callable(self._message_handler)
             return web.json_response({"status": "ready" if ready else "not_ready", "platform": "pipefacil",
@@ -513,6 +561,8 @@ class PipefacilAdapter(BasePlatformAdapter):
                                       "workers": len(self._workers), **state, **contract}, status=200 if ready else 503)
         except (OSError, sqlite3.Error, StateError):
             return web.json_response({"status": "not_ready", "error": "state_unavailable", **contract}, status=503)
+        except ExtensionError:
+            return web.json_response({"status": "not_ready", "error": "extension_unavailable", **contract}, status=503)
 
     def _runtime_scope(self):
         from gateway.run import _profile_runtime_scope
@@ -764,6 +814,7 @@ class PipefacilAdapter(BasePlatformAdapter):
                     "O /reset não foi concluído; tente novamente.",
                 )
                 return
+            await self._extension_call("reset", adapter=self, chat_id=chat_id)
             await self._send_control_reply(chat_id, "Contexto do SDR apagado. Pode começar o teste do zero.")
             later_inbound = _messages_after_reset(messages, reset_index)
             if later_inbound:
@@ -779,6 +830,12 @@ class PipefacilAdapter(BasePlatformAdapter):
 
         if any(not m.get("fromMe") and ADMIN.search(str(m.get("body") or "")) for m in messages):
             await self._send_control_reply(chat_id, ADMIN_REPLY)
+            return
+
+        decisions = await self._extension_call("before_event", adapter=self, payload=payload,
+                                              contact=contact, channel=channel, chat_id=chat_id, seq=seq)
+        if any(decision is False for decision in decisions):
+            logger.info("[pipefacil] Profile extension suppressed this inbound conversation")
             return
 
         current_ids = {
@@ -939,6 +996,9 @@ class PipefacilAdapter(BasePlatformAdapter):
             "contact": dict(contact), "destination": dict(self._destinations.get(chat_id, {})), "active": True,
             "job_id": _INGRESS_JOB.get()[1] if _INGRESS_JOB.get() is not None else None,
         }
+        await self._extension_call("prepare_event", adapter=self, event=event,
+                                   context=event._pipefacil_turn_context, history_text=history_text,
+                                   current_text=current_text)
         ingress = _INGRESS_JOB.get()
         event._pipefacil_done = asyncio.get_running_loop().create_future() if ingress is not None else None
         task = None
@@ -986,6 +1046,11 @@ class PipefacilAdapter(BasePlatformAdapter):
         if context is not None:
             context["active"] = False
         chat_id = str(event.source.chat_id)
+        try:
+            await self._extension_call("complete", adapter=self, event=event, outcome=outcome, context=context)
+        except Exception:
+            logger.exception("[pipefacil] Profile extension completion failed")
+            outcome = "failure"
         with self._turn_context_lock:
             remaining = [item for item in self._active_turn_context.get(chat_id, []) if item is not context]
             if remaining:
@@ -1012,7 +1077,8 @@ class PipefacilAdapter(BasePlatformAdapter):
             return context if any(item is context for item in contexts) else None
 
     def toolsets_for_source(self, source):
-        return ["pipefacil"]
+        extensions = getattr(self, "extensions", None)
+        return ["pipefacil", *(extensions.toolsets() if extensions is not None else [])]
 
     async def _deliver_attachments(self, event, extracted, metadata, *, anything_sent, record_delivery):
         # Only pipefacil_send_messages can publish media approved for this profile.
