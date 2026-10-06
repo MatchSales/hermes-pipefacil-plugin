@@ -5,18 +5,24 @@ import re
 from datetime import datetime
 
 from . import api
-from .state import canonical
+from .state import canonical, StateError
 
 
 class CRM:
-    def __init__(self, adapter, *, member_user_id, fields, custom_fields, stages):
+    def __init__(self, adapter, *, member_user_id, fields, custom_fields, stages, handoff_user_id=""):
         self.adapter = adapter
         self.member_user_id = member_user_id
         self.fields = frozenset(fields)
         self.custom_fields = frozenset(custom_fields)
         self.stages = frozenset(stages)
+        if not isinstance(handoff_user_id, str) or len(handoff_user_id) > 100 or "\x00" in handoff_user_id:
+            raise ValueError("Invalid Pipefacil handoff_user_id")
+        self.handoff_user_id = handoff_user_id.strip()
 
     def authorized(self, context, key, *, writing=False):
+        terminal = self.adapter.state.handoff(context.get("job_id"))
+        if terminal and terminal["state"] in {"pending", "accepted", "uncertain"}:
+            raise api.PipefacilAPIError("Handoff is terminal; CRM access is closed for this turn.")
         seq = context.get("deal_seq")
         if not isinstance(seq, int) or seq <= 0:
             raise api.PipefacilAPIError("The current Pipefacil event has no deal to update.")
@@ -54,7 +60,9 @@ class CRM:
                 "customFields": {k: v for k, v in (lead.get("properties") or {}).items() if k in self.custom_fields},
                 "writableFields": sorted(self.fields) if self.member_user_id else [],
                 "writableCustomFields": sorted(self.custom_fields) if self.member_user_id else [],
-                "allowedStages": self.allowed_stages(lead, key) if self.member_user_id else []}
+                "allowedStages": self.allowed_stages(lead, key) if self.member_user_id else [],
+                "handoffConfigured": bool(self.member_user_id and self.handoff_user_id
+                                           and self.handoff_user_id != self.member_user_id)}
 
     def validate(self, properties):
         if not isinstance(properties, dict) or not properties or set(properties) - self.fields:
@@ -106,24 +114,85 @@ class CRM:
 
         def write():
             api.update_deal(api_key=key, base_url=self.adapter.api_base_url, seq=lead["seq"], properties=properties)
-            after = self.authorized(context, key, writing=True)
-            for field, value in properties.items():
-                actual = after.get(field)
-                if field == "customFields":
-                    if any((after.get("properties") or {}).get(k) != v for k, v in value.items()):
-                        raise api.PipefacilAPIError("Deal update could not be confirmed.")
-                elif field == "tagIds":
-                    if {t["id"] for t in after.get("tags", [])} != set(value):
-                        raise api.PipefacilAPIError("Deal tags could not be confirmed.")
-                elif field == "contact":
-                    detail = api.get_contact(api_key=key, base_url=self.adapter.api_base_url, contact_id=after["contact"]["id"])
-                    if any(detail.get(k) != v for k, v in value.items()):
-                        raise api.PipefacilAPIError("Contact update could not be confirmed.")
-                elif field == "expectedCloseAt":
-                    if not isinstance(actual, str) or datetime.fromisoformat(actual.replace("Z", "+00:00")) != datetime.fromisoformat(value.replace("Z", "+00:00")):
-                        raise api.PipefacilAPIError("Deal timestamp could not be confirmed.")
-                elif actual != value:
-                    raise api.PipefacilAPIError("Deal update could not be confirmed.")
+            try:
+                after = self.authorized(context, key, writing=True)
+                self.verify_properties(after, key, properties)
+            except api.PipefacilAPIError as exc:
+                # A failed GET cannot prove that the preceding PATCH was rejected.
+                raise api.PipefacilAPIError("Deal update readback is uncertain: " + str(exc)) from None
             return {"success": True, "updated": True, "seq": lead["seq"], "updated_fields": sorted(properties)}
 
         return self.adapter.effect(context["job_id"], "update_deal", properties, write, active=active)
+
+    def verify_properties(self, after, key, properties):
+        for field, value in properties.items():
+            actual = after.get(field)
+            if field == "customFields":
+                if any((after.get("properties") or {}).get(k) != v for k, v in value.items()):
+                    raise api.PipefacilAPIError("Deal update could not be confirmed.")
+            elif field == "tagIds":
+                if {t["id"] for t in after.get("tags", [])} != set(value):
+                    raise api.PipefacilAPIError("Deal tags could not be confirmed.")
+            elif field == "contact":
+                detail = api.get_contact(api_key=key, base_url=self.adapter.api_base_url, contact_id=after["contact"]["id"])
+                if any(detail.get(k) != v for k, v in value.items()):
+                    raise api.PipefacilAPIError("Contact update could not be confirmed.")
+            elif field == "expectedCloseAt":
+                if not isinstance(actual, str) or datetime.fromisoformat(actual.replace("Z", "+00:00")) != datetime.fromisoformat(value.replace("Z", "+00:00")):
+                    raise api.PipefacilAPIError("Deal timestamp could not be confirmed.")
+            elif actual != value:
+                raise api.PipefacilAPIError("Deal update could not be confirmed.")
+
+    def prepare_handoff(self, context, key, properties, active):
+        """All nonterminal mutations are verified while this member still owns the deal."""
+        if not self.handoff_user_id or self.handoff_user_id == self.member_user_id:
+            raise ValueError("Configure a different PIPEFACIL_HANDOFF_USER_ID for this profile.")
+        try:
+            self.adapter.state.assert_handoff_ready(context["job_id"])
+        except StateError as exc:
+            raise api.PipefacilAPIError(str(exc)) from None
+        if properties:
+            self.validate(properties)
+        lead = self.authorized(context, key, writing=True)
+        if lead.get("status") != "open":
+            raise ValueError("Handoff requires an open deal.")
+        if any(not isinstance(lead.get(field), str) or not lead[field] for field in ("pipelineId", "stageId")):
+            raise api.PipefacilAPIError("Handoff requires a verified pipeline and stage.")
+        if "stageId" in properties:
+            stages = [s for s in self.allowed_stages(lead, key) if s["id"] == properties["stageId"]]
+            if len(stages) != 1 or stages[0]["isLost"] or stages[0]["isWon"]:
+                raise ValueError("Handoff requires an allowed open stage in the current pipeline.")
+        if properties:
+            self.update(context, key, properties, active)
+        after = self.authorized(context, key, writing=True)
+        self.verify_properties(after, key, properties)
+        return {"seq": after["seq"], "contactId": after["contact"]["id"],
+                "pipelineId": after.get("pipelineId"), "stageId": after.get("stageId")}
+
+    def transfer_handoff(self, context, key, prepared, properties, arguments, active):
+        def write():
+            # Confirm using the PATCH receipt: assignment may revoke GET access.
+            target = arguments["responsibleUserId"]
+            try:
+                envelope = api.update_deal(api_key=key, base_url=self.adapter.api_base_url,
+                                           seq=prepared["seq"], properties={"responsibleUserId": target})
+            except api.PipefacilAPIError as exc:
+                # Even a 404 at this boundary may reflect lost visibility. Do not
+                # turn it into permission to send again or try another assignment.
+                raise api.PipefacilAPIError("Handoff outcome is uncertain; operator reconciliation required: " + str(exc)) from None
+            receipt = envelope.get("data") if isinstance(envelope, dict) else None
+            expected = {**prepared, "responsibleUserId": target, "status": "open"}
+            if (not isinstance(receipt, dict) or envelope.get("success") is False or receipt.get("success") is False
+                    or any(receipt.get(k) != v for k, v in expected.items())):
+                raise api.PipefacilAPIError("Handoff receipt is uncertain; operator reconciliation required.")
+            return {"success": True, "updated": True, "handed_off": True, "terminal": True,
+                    **expected, "updated_fields": sorted(properties)}
+
+        with self.adapter._effect_lock:
+            lead = self.authorized(context, key, writing=True)
+            if (lead.get("status") != "open" or any(
+                    (lead["contact"]["id"] if k == "contactId" else lead.get(k)) != v
+                    for k, v in prepared.items())):
+                raise api.PipefacilAPIError("Deal changed before handoff; transfer was not performed.")
+            self.verify_properties(lead, key, properties)
+            return self.adapter.effect(context["job_id"], "handoff", arguments, write, active=active)

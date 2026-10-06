@@ -82,7 +82,7 @@ def request_json(
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key.strip()}",
-        "User-Agent": "hermes-pipefacil-plugin/0.4.4",
+        "User-Agent": "hermes-pipefacil-plugin/0.4.5",
     }
     try:
         with httpx.Client(timeout=API_TIMEOUT_SECONDS, follow_redirects=False, trust_env=False) as client:

@@ -85,6 +85,7 @@ e até 30 segundos no futuro. O horário de uma entrega nova não torna uma mens
 | `PIPEFACIL_WEBHOOK_PATH` | `/events/message-received` |
 | `PIPEFACIL_CHANNEL_IDS` | Lista opcional de IDs separados por vírgula |
 | `PIPEFACIL_MEMBER_USER_ID` | userId do responsável do agente; habilita mutações |
+| `PIPEFACIL_HANDOFF_USER_ID` | userId humano de destino; habilita handoff ordenado por profile |
 | `PIPEFACIL_WRITABLE_FIELDS` | `notes,customFields,stageId,lostReason` |
 | `PIPEFACIL_CUSTOM_FIELDS` | Nenhum por padrão; slugs permitidos separados por vírgula |
 | `PIPEFACIL_STAGE_IDS` | Nenhuma por padrão; IDs de etapas permitidas separados por vírgula |
@@ -144,6 +145,13 @@ o diário evita repetições locais, sem garantir entrega exatamente uma vez. Ac
 PATCH usa o negócio do turno, valida propriedades e confirma por GET autorizado. O modelo não escolhe
 workspace, destinatário ou outro negócio. O backend continua responsável por autorização atômica.
 
+`pipefacil_handoff` executa campos/etapa → confirmação → encerramento opcional → troca de
+responsável. O destino vem de `PIPEFACIL_HANDOFF_USER_ID` ou `extra.handoff_user_id`; não é
+argumento do modelo. A transferência faz PATCH apenas de `responsibleUserId` e confirma
+seq, contato, funil, etapa, status aberto e novo responsável no recibo dessa resposta. Não
+faz GET depois. Transferência aceita ou incerta encerra acesso CRM e novos efeitos do turno;
+a resposta automática final é suprimida. Ações anteriores pendentes/incertas impedem o handoff.
+
 ## Saúde e reconciliação
 
 `GET <callback>/health` informa prontidão, erro fatal, contadores, workers e estados de jobs/efeitos.
@@ -160,7 +168,8 @@ python state_cli.py --profile /caminho/do/profile reconcile --action <id> \
 ```
 
 Recibo: `{"message_id":"id","status":"accepted"}` para envio, `{"key":"storage-key"}` para upload
-ou `{"updated":true}` para alteração comprovada. `--outcome not_performed` registra que a ação não
+ou `{"updated":true}` para alteração comprovada. Para handoff, o recibo verificado deve
+incluir `updated`, `handed_off` e `terminal` verdadeiros, `seq` e `responsibleUserId` do destino. `--outcome not_performed` registra que a ação não
 ocorreu. Reconciliação mantém evidência e não repete turno/envio. Lock exclusivo recusa alterações
 com o gateway ativo. Diretório 0700, journal 0600. Dados de jobs/recibos encerrados são removidos em
 sete dias; efeitos incertos mantêm referências até resolução, sem preservar o webhook além desse prazo.

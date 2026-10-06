@@ -235,6 +235,31 @@ que a API aceitou a requisição, mas não confirma a entrega pelo WhatsApp. A l
 anexos do turno atual e aos arquivos em `knowledge/` dentro do próprio profile. O toolset Hermes `file`
 não deve ser habilitado no atendimento público, pois também permite escrever e alterar arquivos.
 
+### Handoff ordenado (0.4.5)
+
+Configure `PIPEFACIL_HANDOFF_USER_ID` (ou `platforms.pipefacil.extra.handoff_user_id`) com o
+**userId** humano de destino de cada SDR. Também é obrigatório `PIPEFACIL_MEMBER_USER_ID`,
+com um responsável diferente do destino. O modelo não escolhe destinatário ou outro negócio.
+
+Use `pipefacil_handoff` por último. `properties` contém os campos finais e, opcionalmente,
+`stageId`, respeitando as listas permitidas do profile; não é possível mover para ganho/perdido
+nesse fluxo. O plugin grava e confirma os campos/etapa, envia o encerramento opcional em `message`
+e só então troca `responsibleUserId`, em uma requisição separada. A confirmação usa o recibo
+do próprio PATCH, sem consultar o lead depois de perder acesso.
+
+Depois de uma transferência aceita ou incerta, leituras/alterações no CRM e novos envios do
+turno ficam bloqueados, incluindo a resposta final automática. Portanto, forneça o texto de
+encerramento em `message`, ou omita-o se já enviado. Use uma intenção como “Vou encaminhar seu
+atendimento”, sem afirmar que já transferiu antes da confirmação. Falta de recibo, recibo inválido
+ou erro HTTP na transferência exigem reconciliação pelo operador; o plugin não repete a requisição.
+Ações anteriores pendentes ou incertas impedem o handoff. Repetir a mesma chamada bem-sucedida
+apenas devolve seu recibo salvo.
+
+A ordem e o controle de execução pertencem ao plugin. IDs, campos/etapas permitidos, critérios
+comerciais e texto pertencem à configuração/instruções de cada profile. Código comercial exclusivo
+pode chamar esse contrato a partir de uma extensão separada. Os forks existentes precisam substituir
+seus fluxos antigos de transferência; atualizar este repositório não migra esses profiles automaticamente.
+
 ### Biblioteca de mídia do profile
 
 Cadastre cada link HTTPS que o agente pode compartilhar no `SOUL.md` do próprio profile. Uma entrada deve

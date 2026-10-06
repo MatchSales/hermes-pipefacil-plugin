@@ -37,6 +37,33 @@ _DEAL_FIELDS = {
 }
 
 
+_DEAL_PROPERTIES_SCHEMA = {
+    "type": "object",
+    "description": "Fields to patch; workspaceId is deliberately not accepted.",
+    "properties": {
+        "name": {"type": "string"},
+        "value": {"type": "number", "minimum": 0},
+        "currency": {"type": "string", "maxLength": 3},
+        "closeProbability": {"type": "integer", "minimum": 0, "maximum": 100},
+        "expectedCloseAt": {"type": "string", "format": "date-time"},
+        "stageId": {"type": "string"},
+        "lostReason": {"type": "string", "maxLength": 255},
+        "notes": {"type": "string", "maxLength": 2000},
+        "tagIds": {"type": "array", "items": {"type": "string"}},
+        "customFields": {"type": "object", "additionalProperties": True},
+        "contact": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "email": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    "additionalProperties": False,
+}
+
+
 def _api_base_url() -> str:
     from hermes_cli.config import load_config_readonly
 
@@ -99,6 +126,31 @@ async def _current_deal(args, *, session_id="", **kwargs):
         result = await asyncio.to_thread(adapter.crm.read, context, get_scoped_secret("PIPEFACIL_API_KEY", ""))
         return tool_result(result)
     except (PipefacilAPIError, ValueError) as exc:
+        return tool_error(str(exc))
+
+
+async def _handoff(args, *, session_id="", **kwargs):
+    from hermes_constants import get_hermes_home
+    from tools.registry import tool_error, tool_result
+    from .adapter import adapter_for_profile
+    from .handoff import execute
+
+    home = Path(get_hermes_home()).resolve()
+    chat, error = _active_pipefacil_chat(session_id, home)
+    if error:
+        return tool_error(error)
+    adapter = adapter_for_profile(home, chat)
+    context = adapter.trusted_turn_context(chat)
+    if context is None:
+        return tool_error("There is no active Pipefacil turn to hand off.")
+    def active():
+        current = adapter.trusted_turn_context(chat)
+        return current is not None and current.get("job_id") == context.get("job_id")
+    try:
+        result = await execute(adapter, chat, context, get_scoped_secret("PIPEFACIL_API_KEY", ""), args,
+                               active)
+        return tool_result(result)
+    except (PipefacilAPIError, TypeError, ValueError) as exc:
         return tool_error(str(exc))
 
 
@@ -366,31 +418,7 @@ def register_tools(ctx) -> None:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "properties": {
-                        "type": "object",
-                        "description": "Fields to patch; workspaceId is deliberately not accepted.",
-                        "properties": {
-                            "name": {"type": "string"},
-                            "value": {"type": "number", "minimum": 0},
-                            "currency": {"type": "string", "maxLength": 3},
-                            "closeProbability": {"type": "integer", "minimum": 0, "maximum": 100},
-                            "expectedCloseAt": {"type": "string", "format": "date-time"},
-                            "stageId": {"type": "string"},
-                            "lostReason": {"type": "string", "maxLength": 255},
-                            "notes": {"type": "string", "maxLength": 2000},
-                            "tagIds": {"type": "array", "items": {"type": "string"}},
-                            "customFields": {"type": "object", "additionalProperties": True},
-                            "contact": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "email": {"type": "string"},
-                                },
-                                "additionalProperties": False,
-                            },
-                        },
-                        "additionalProperties": False,
-                    },
+                    "properties": _DEAL_PROPERTIES_SCHEMA,
                 },
                 "required": ["properties"],
                 "additionalProperties": False,
@@ -400,6 +428,18 @@ def register_tools(ctx) -> None:
         check_fn=_pipefacil_available,
         is_async=True,
         emoji="🗂️",
+    )
+
+    name = "pipefacil_handoff"
+    ctx.register_tool(
+        name=name, toolset="pipefacil", description=TOOL_DESCRIPTIONS[name],
+        schema={"name": name, "description": TOOL_DESCRIPTIONS[name], "parameters": {
+            "type": "object", "properties": {
+                "properties": _DEAL_PROPERTIES_SCHEMA,
+                "message": {"type": "string", "minLength": 1, "maxLength": 4000,
+                            "description": "Customer-facing closing text, sent before ownership changes."},
+            }, "additionalProperties": False}},
+        handler=_handoff, check_fn=_pipefacil_available, is_async=True, emoji="🤝",
     )
 
     read_name = "pipefacil_read_profile_file"

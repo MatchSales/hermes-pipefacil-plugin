@@ -59,11 +59,12 @@ def multiplex(tmp_path, monkeypatch):
             finally:
                 reset_hermes_home_override(scoped)
             adapter = object.__new__(adapter_module.PipefacilAdapter)
+            adapter.state = adapter_module.State(home)
             adapter.profile_home = home
             adapter.gateway_runner = SimpleNamespace(session_store=store)
             adapter._destinations = {chat_id: {"phone": "test-contact"}}
             adapter._turn_context_lock = threading.RLock()
-            contexts[name] = {"deal_seq": 106, "media_paths": frozenset(), "session_key": entries[name].session_key}
+            contexts[name] = {"deal_seq": 106, "job_id": 1, "media_paths": frozenset(), "session_key": entries[name].session_key}
             adapter._active_turn_context = {chat_id: [contexts[name]]}
             adapter._history_reset_lock = threading.RLock()
             adapter._pending_reset_purges = {}
@@ -106,7 +107,7 @@ def test_live_route_is_resolved_when_routing_index_lives_in_gateway_home(multipl
     assert m.tools._active_pipefacil_chat(m.entries["sdr-a"].session_id, m.homes["sdr-a"])[0] is None
 
 
-def test_all_three_tools_use_the_current_profile_route(multiplex, monkeypatch):
+def test_read_send_update_and_handoff_use_the_current_profile_route(multiplex, monkeypatch):
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     from tools.approval_context import reset_current_observability_context, set_current_observability_context
     m = multiplex
@@ -140,6 +141,19 @@ def test_all_three_tools_use_the_current_profile_route(multiplex, monkeypatch):
             {"properties": {"notes": "confirmed by the lead"}}, session_id=sid,
         )))["success"] is True
         assert updates[0]["seq"] == 106
+        async def handoff(adapter, chat, context, key, args, is_active):
+            assert adapter is m.adapters["sdr-a"] and chat == m.chat_id
+            assert context["deal_seq"] == 106 and key == "test-key"
+            assert is_active()
+            # A new event in the same chat cannot authorize effects for the old job.
+            context_in_turn = adapter._active_turn_context[chat][0]
+            context_in_turn["job_id"] = 2
+            assert not is_active()
+            return {"success": True}
+        from importlib import import_module
+        monkeypatch.setattr(import_module(m.tools.__package__ + ".handoff"), "execute", handoff)
+        with m.adapters["sdr-a"]._runtime_scope():
+            assert json.loads(asyncio.run(m.tools._handoff({}, session_id=sid)))["success"]
     finally:
         active.__exit__(None, None, None)
         reset_current_observability_context(ctx)
@@ -446,7 +460,7 @@ def test_real_hermes_busy_reply_is_suppressed_but_background_answer_is_delivered
         source=replace(m.entries["sdr-a"].origin, message_id="fresh"), message_id="fresh",
         allow_gateway_control=False,
     )
-    event._pipefacil_turn_context = {"deal_seq": 106, "media_paths": frozenset()}
+    event._pipefacil_turn_context = {"deal_seq": 106, "job_id": 1, "media_paths": frozenset()}
 
     async def scenario():
         async def handler(current):

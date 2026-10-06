@@ -1,7 +1,7 @@
 """Runtime tool restriction for public lead conversations, including tool_call wrappers."""
 
 NAMES = frozenset({"pipefacil_update_deal", "pipefacil_current_deal", "pipefacil_read_profile_file",
-                   "pipefacil_list_media", "pipefacil_send_messages"})
+                   "pipefacil_list_media", "pipefacil_send_messages", "pipefacil_handoff"})
 
 
 def pre_tool_call(tool_name, args=None, **kwargs):
