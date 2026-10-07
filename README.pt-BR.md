@@ -13,7 +13,7 @@ uma ferramenta restrita para atualizar o negócio no CRM.
 - Envia a resposta final do agente ao lead pela API do Pipefacil.
 - Registra `pipefacil_send_messages`, que permite enviar até duas mensagens adicionais (texto, imagem ou documento) antes da resposta final automática do Hermes.
 - Baixa somente anexos atuais e usa visão, leitura de documentos e transcrição de áudio nativas do Hermes.
-- Oferece catálogo de imagens/documentos em `media/` no próprio profile, com upload na API existente do Pipefacil e links temporários.
+- Oferece catálogo de imagens/documentos em `media/` no próprio profile, com armazenamento permanente de mídias no CRM antes do envio.
 - Persiste a fila e as tentativas de envio antes de confirmar a admissão; ordena toda a execução por conversa.
 - Se não conseguir carregar o histórico do Pipefacil, usa o histórico local do Hermes que estiver
   disponível para aquela conversa.
@@ -259,6 +259,29 @@ A ordem e o controle de execução pertencem ao plugin. IDs, campos/etapas permi
 comerciais e texto pertencem à configuração/instruções de cada profile. Código comercial exclusivo
 pode chamar esse contrato a partir de uma extensão separada. Os forks existentes precisam substituir
 seus fluxos antigos de transferência; atualizar este repositório não migra esses profiles automaticamente.
+
+### Mídias permanentes no chat (0.5.0)
+
+Todos os profiles usam o mesmo fluxo para imagens e documentos: upload em
+`POST /api/v1/conversations/media` e envio do `assetId` retornado como `mediaAssetId`
+em `POST /api/v1/conversations/messages`. Links externos aprovados no `SOUL.md`
+também são copiados para esse armazenamento, com DNS público fixado, sem redirects
+ou proxies, validação de MIME/assinatura e limite de 16 MiB.
+
+O CRM conserva a referência permanente e renova o link privado ao abrir a mídia no
+chat. O cache fica isolado por profile, origem da API, credencial, conteúdo, nome e
+MIME. Recibos antigos de campos personalizados não entram no novo cache.
+O health informa `mediaPersistenceRevision: 1` para conferir a frota.
+
+**Publicar a API de mídias do backend antes de atualizar o plugin.** Se a rota estiver
+ausente ou o upload falhar, a imagem/documento não será enviado. Não há retorno ao
+link temporário que causava o problema. Uploads com resultado incerto continuam
+exigindo reconciliação; respostas de texto continuam disponíveis. A API de extensões
+permanece na revisão 1, incluindo o contrato de áudio, já persistido pelo backend.
+
+A atualização vale para novos envios de todos os SDRs que usam o plugin comum.
+Mensagens antigas precisam de reparo separado no backend a partir de suas chaves
+de armazenamento, respeitando o workspace. A atualização não reenvia mensagens.
 
 ### Código específico de cada SDR (0.4.6)
 

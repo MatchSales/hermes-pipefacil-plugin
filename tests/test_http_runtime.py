@@ -188,13 +188,13 @@ def test_native_hermes_completes_before_next_history_or_model_turn_and_other_cha
     asyncio.run(scenario())
 
 
-def test_local_profile_upload_and_send_are_deduplicated_with_fresh_signed_links(tmp_path, monkeypatch):
+def test_local_profile_upload_and_send_are_deduplicated_with_permanent_media_assets(tmp_path, monkeypatch):
     value = adapter(tmp_path, monkeypatch)
     (tmp_path / "media").mkdir()
     body = b"%PDF-1.7\nprofile-approved-catalog"
     (tmp_path / "media" / "catalog.pdf").write_bytes(body)
     identity = module("library").catalog(tmp_path)[0].id
-    uploaded, sent, resolved = [], [], []
+    uploaded, sent = [], []
 
     async def upload(request):
         assert request.headers["Authorization"] == "Bearer test-key"
@@ -202,11 +202,7 @@ def test_local_profile_upload_and_send_are_deduplicated_with_fresh_signed_links(
         part = await form.next()
         assert part.name == "file" and part.filename == "catalog.pdf"
         uploaded.append(bytes(await part.read()))
-        return web.json_response({"data": {"key": "custom-fields/test/file", "name": "catalog.pdf", "size": len(body), "mimeType": "application/pdf"}})
-
-    async def url(request):
-        resolved.append(request.query["key"])
-        return web.json_response({"data": {"url": "https://storage.example.org/catalog.pdf?signature=" + str(len(resolved))}})
+        return web.json_response({"data": {"assetId": "asset-catalog", "filename": "catalog.pdf", "sizeBytes": len(body), "contentType": "application/pdf"}})
 
     async def send(request):
         sent.append(await request.json())
@@ -221,8 +217,7 @@ def test_local_profile_upload_and_send_are_deduplicated_with_fresh_signed_links(
 
     async def scenario():
         api = web.Application()
-        api.router.add_post("/api/v1/custom-fields/upload", upload)
-        api.router.add_get("/api/v1/custom-fields/file", url)
+        api.router.add_post("/api/v1/conversations/media", upload)
         api.router.add_post("/api/v1/conversations/messages", send)
         server, base = await listener(api)
         value.api_base_url = base
@@ -235,9 +230,9 @@ def test_local_profile_upload_and_send_are_deduplicated_with_fresh_signed_links(
                 value._schedule("channel:+12025550191")
                 await asyncio.wait_for(drain(value), 5)
             assert uploaded == [body]
-            assert len(resolved) == 2
             assert [m["type"] for m in sent] == ["document", "text", "document", "text"]
-            assert sent[0]["mediaLink"] != sent[2]["mediaLink"]
+            assert sent[0]["mediaAssetId"] == sent[2]["mediaAssetId"] == "asset-catalog"
+            assert all("mediaLink" not in m for m in sent)
             assert all(m["to"] == "+12025550191" and m["channelId"] == "channel" for m in sent)
             assert value.state.status()["actions"] == {"accepted": 5}
         finally:
@@ -345,7 +340,7 @@ def test_timeout_revokes_worker_capability_and_stops_native_task(tmp_path, monke
 
 
 @pytest.mark.parametrize('ambiguous_upload', [False, True])
-def test_failed_media_preparation_allows_final_text_without_repeating_upload(tmp_path, monkeypatch, ambiguous_upload):
+def test_failed_media_upload_allows_final_text_without_repeating_uncertain_upload(tmp_path, monkeypatch, ambiguous_upload):
     value = adapter(tmp_path, monkeypatch)
     (tmp_path / 'media').mkdir()
     (tmp_path / 'media' / 'catalog.pdf').write_bytes(b'%PDF-1.7\nfixture')
@@ -357,10 +352,7 @@ def test_failed_media_preparation_allows_final_text_without_repeating_upload(tmp
         await request.read()
         if ambiguous_upload:
             return web.json_response({'error':'unknown_outcome'}, status=503)
-        return web.json_response({'data':{'key':'storage/file'}})
-
-    async def url(request):
-        return web.json_response({'data':{'url':'http://storage.example.org/catalog.pdf'}})
+        return web.json_response({'error':'unsupported_media'}, status=415)
 
     async def send(request):
         sent.append(await request.json())
@@ -375,8 +367,7 @@ def test_failed_media_preparation_allows_final_text_without_repeating_upload(tmp
 
     async def scenario():
         app = web.Application()
-        app.router.add_post('/api/v1/custom-fields/upload', upload)
-        app.router.add_get('/api/v1/custom-fields/file', url)
+        app.router.add_post('/api/v1/conversations/media', upload)
         app.router.add_post('/api/v1/conversations/messages', send)
         server, base = await listener(app)
         value.api_base_url = base
@@ -390,7 +381,7 @@ def test_failed_media_preparation_allows_final_text_without_repeating_upload(tmp
                 await asyncio.wait_for(drain(value), 5)
             assert len(uploads) == 1
             assert len(sent) == 2 and all(m['type'] == 'text' for m in sent)
-            assert value.state.status()['actions']['rejected'] == 2
+            assert value.state.status()['actions']['rejected'] == (2 if ambiguous_upload else 3)
             assert value.state.status()['actions'].get('uncertain', 0) == int(ambiguous_upload)
         finally:
             await server.cleanup()
