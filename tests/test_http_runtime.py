@@ -17,7 +17,7 @@ def adapter(home, monkeypatch, *, capacity=500, concurrency=4, timeout=30):
     from gateway.config import Platform, PlatformConfig
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override
     home.mkdir(parents=True, exist_ok=True)
-    (home / ".env").write_text("PIPEFACIL_API_KEY=test-key\nPIPEFACIL_WEBHOOK_SECRET=literal-secret\n")
+    (home / ".env").write_text("PIPEFACIL_API_KEY=test-key\nPIPEFACIL_WEBHOOK_SECRET=literal-secret\nPIPEFACIL_MEDIA_UPLOAD_TOKEN=test-media-token\n")
     Platform._add_pseudo_member("pipefacil")
     token = set_hermes_home_override(str(home))
     try:
@@ -25,7 +25,7 @@ def adapter(home, monkeypatch, *, capacity=500, concurrency=4, timeout=30):
         with _profile_runtime_scope(home):
             value = _modules()[0].PipefacilAdapter(PlatformConfig(enabled=True, extra={
                 "queue_capacity": capacity, "queue_per_chat": min(capacity, 50), "concurrency": concurrency,
-                "turn_timeout_seconds": max(timeout, 10)}))
+                "turn_timeout_seconds": max(timeout, 10), "media_base_url": "https://media.example"}))
     finally:
         reset_hermes_home_override(token)
     value.turn_timeout = timeout
@@ -188,7 +188,7 @@ def test_native_hermes_completes_before_next_history_or_model_turn_and_other_cha
     asyncio.run(scenario())
 
 
-def test_local_profile_upload_and_send_are_deduplicated_with_permanent_media_assets(tmp_path, monkeypatch):
+def test_local_profile_r2_upload_and_crm_send_are_deduplicated(tmp_path, monkeypatch):
     value = adapter(tmp_path, monkeypatch)
     (tmp_path / "media").mkdir()
     body = b"%PDF-1.7\nprofile-approved-catalog"
@@ -197,14 +197,16 @@ def test_local_profile_upload_and_send_are_deduplicated_with_permanent_media_ass
     uploaded, sent = [], []
 
     async def upload(request):
-        assert request.headers["Authorization"] == "Bearer test-key"
-        form = await request.multipart()
-        part = await form.next()
-        assert part.name == "file" and part.filename == "catalog.pdf"
-        uploaded.append(bytes(await part.read()))
-        return web.json_response({"data": {"assetId": "asset-catalog", "filename": "catalog.pdf", "sizeBytes": len(body), "contentType": "application/pdf"}})
+        assert request.headers["Authorization"] == "Bearer test-media-token"
+        assert request.headers["X-Media-Filename"] == "catalog.pdf"
+        uploaded.append(await request.read())
+        import hashlib
+        return web.json_response({"data": {"key": "a" * 64, "url": "https://" + request.host + "/media/" + "a" * 64,
+            "filename": "catalog.pdf", "sizeBytes": len(body), "contentType": "application/pdf",
+            "sha256": hashlib.sha256(body).hexdigest()}})
 
     async def send(request):
+        assert request.headers["Authorization"] == "Bearer test-key"
         sent.append(await request.json())
         return web.json_response({"data": {"id": "message-" + str(len(sent)), "status": "queued"}})
 
@@ -217,10 +219,11 @@ def test_local_profile_upload_and_send_are_deduplicated_with_permanent_media_ass
 
     async def scenario():
         api = web.Application()
-        api.router.add_post("/api/v1/conversations/media", upload)
+        api.router.add_post("/upload", upload)
         api.router.add_post("/api/v1/conversations/messages", send)
         server, base = await listener(api)
         value.api_base_url = base
+        value.media_base_url = base
         try:
             for identifier in ("one", "two"):
                 data = json.loads(payload(identifier))["data"]
@@ -231,8 +234,8 @@ def test_local_profile_upload_and_send_are_deduplicated_with_permanent_media_ass
                 await asyncio.wait_for(drain(value), 5)
             assert uploaded == [body]
             assert [m["type"] for m in sent] == ["document", "text", "document", "text"]
-            assert sent[0]["mediaAssetId"] == sent[2]["mediaAssetId"] == "asset-catalog"
-            assert all("mediaLink" not in m for m in sent)
+            assert sent[0]["mediaLink"] == sent[2]["mediaLink"] == base.replace("http://", "https://") + "/media/" + "a" * 64
+            assert all("mediaAssetId" not in m for m in sent)
             assert all(m["to"] == "+12025550191" and m["channelId"] == "channel" for m in sent)
             assert value.state.status()["actions"] == {"accepted": 5}
         finally:
@@ -258,6 +261,7 @@ def test_backend_failure_after_send_is_uncertain_and_never_repeats_http_write(tm
         app.router.add_post("/api/v1/conversations/messages", send)
         server, base = await listener(app)
         value.api_base_url = base
+        value.media_base_url = base
         try:
             data = json.loads(payload())["data"]
             value.state.admit({"payload": {"data": data}, "messages": data["messages"], "contact": data["contact"],
@@ -355,6 +359,7 @@ def test_failed_media_upload_allows_final_text_without_repeating_uncertain_uploa
         return web.json_response({'error':'unsupported_media'}, status=415)
 
     async def send(request):
+        assert request.headers["Authorization"] == "Bearer test-key"
         sent.append(await request.json())
         return web.json_response({'data':{'id':'message-'+str(len(sent)), 'status':'queued'}})
 
@@ -367,10 +372,11 @@ def test_failed_media_upload_allows_final_text_without_repeating_uncertain_uploa
 
     async def scenario():
         app = web.Application()
-        app.router.add_post('/api/v1/conversations/media', upload)
+        app.router.add_post('/upload', upload)
         app.router.add_post('/api/v1/conversations/messages', send)
         server, base = await listener(app)
         value.api_base_url = base
+        value.media_base_url = base
         try:
             for name in ['first', 'second']:
                 data = json.loads(payload(name))['data']

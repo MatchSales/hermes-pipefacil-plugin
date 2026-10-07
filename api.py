@@ -82,7 +82,7 @@ def request_json(
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key.strip()}",
-        "User-Agent": "hermes-pipefacil-plugin/0.5.0",
+        "User-Agent": "hermes-pipefacil-plugin/0.5.1",
     }
     try:
         with httpx.Client(timeout=API_TIMEOUT_SECONDS, follow_redirects=False, trust_env=False) as client:
@@ -158,7 +158,6 @@ def send_message(
     message_type: str,
     text: str | None = None,
     media_link: str | None = None,
-    media_asset_id: str | None = None,
     caption: str | None = None,
     filename: str | None = None,
     mime_type: str | None = None,
@@ -174,16 +173,9 @@ def send_message(
             raise PipefacilAPIError("Refusing to send an empty Pipefacil text message.")
         body["text"] = text
     else:
-        if media_asset_id is not None:
-            if not isinstance(media_asset_id, str) or not media_asset_id.strip():
-                raise PipefacilAPIError("Pipefacil media requires a valid mediaAssetId.")
-            if media_link is not None:
-                raise PipefacilAPIError("Choose mediaAssetId or mediaLink, never both.")
-            body["mediaAssetId"] = media_asset_id
-        elif not isinstance(media_link, str) or not media_link.startswith("https://"):
+        if not isinstance(media_link, str) or not media_link.startswith("https://"):
             raise PipefacilAPIError("Pipefacil media messages require an HTTPS mediaLink.")
-        else:
-            body["mediaLink"] = media_link
+        body["mediaLink"] = media_link
         if caption:
             body["caption"] = caption
         if filename:
@@ -242,24 +234,6 @@ def upload_media(*, api_key, base_url, filename, mime_type, body):
                         files={"file": (filename, body, mime_type)})["data"]
     if not isinstance(data, dict) or not isinstance(data.get("key"), str) or not data["key"]:
         raise PipefacilAPIError("Pipefacil returned an invalid upload receipt.")
-    return data
-
-
-def upload_message_media(*, api_key, base_url, filename, mime_type, body):
-    """Upload a persistent chat asset; never fall back to a temporary custom-field URL."""
-    try:
-        data = request_json(api_key=api_key, base_url=base_url, method="POST",
-                            path="/api/v1/conversations/media",
-                            files={"file": (filename, body, mime_type)})["data"]
-    except PipefacilAPIError as exc:
-        if exc.status_code in {404, 405}:
-            raise PipefacilAPIError(
-                "Pipefacil requires the conversation media upload API before this plugin can send images/documents.",
-                status_code=exc.status_code, definite_rejection=True) from None
-        raise
-    if (not isinstance(data, dict) or not isinstance(data.get("assetId"), str)
-            or not data["assetId"].strip() or len(data["assetId"]) > 128):
-        raise PipefacilAPIError("Pipefacil returned an invalid persistent media upload receipt.")
     return data
 
 

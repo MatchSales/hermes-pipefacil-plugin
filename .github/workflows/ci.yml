@@ -39,3 +39,11 @@ jobs:
               export HERMES_SOURCE PYTHONPATH="$HERMES_SOURCE:/tmp/plugin/tests"
               /opt/hermes/.venv/bin/python -c "import gateway.platforms.base; print(gateway.platforms.base.__file__)"
               /opt/hermes/.venv/bin/python -m pytest --import-mode=importlib /tmp/plugin/tests -q'
+  media-gateway:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: node --test infra/r2-media/worker.test.mjs

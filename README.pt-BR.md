@@ -260,28 +260,39 @@ comerciais e texto pertencem à configuração/instruções de cada profile. Có
 pode chamar esse contrato a partir de uma extensão separada. Os forks existentes precisam substituir
 seus fluxos antigos de transferência; atualizar este repositório não migra esses profiles automaticamente.
 
-### Mídias permanentes no chat (0.5.0)
+### Mídias permanentes no chat (0.5.1)
 
-Todos os profiles usam o mesmo fluxo para imagens e documentos: upload em
-`POST /api/v1/conversations/media` e envio do `assetId` retornado como `mediaAssetId`
-em `POST /api/v1/conversations/messages`. Links externos aprovados no `SOUL.md`
-também são copiados para esse armazenamento, com DNS público fixado, sem redirects
-ou proxies, validação de MIME/assinatura e limite de 16 MiB.
+O plugin comum copia imagens/documentos aprovados para um bucket R2 privado e envia
+um link HTTPS permanente como `mediaLink` pela API atual de mensagens do PipeFácil.
+Não exige alteração no backend do CRM. O código do gateway e a configuração ficam
+em [infra/r2-media](infra/r2-media/README.md), neste repositório.
 
-O CRM conserva a referência permanente e renova o link privado ao abrir a mídia no
-chat. O cache fica isolado por profile, origem da API, credencial, conteúdo, nome e
-MIME. Recibos antigos de campos personalizados não entram no novo cache.
-O health informa `mediaPersistenceRevision: 1` para conferir a frota.
+Configure o `.env` de cada SDR antes de habilitar seus envios de mídia:
 
-**Publicar a API de mídias do backend antes de atualizar o plugin.** Se a rota estiver
-ausente ou o upload falhar, a imagem/documento não será enviado. Não há retorno ao
-link temporário que causava o problema. Uploads com resultado incerto continuam
-exigindo reconciliação; respostas de texto continuam disponíveis. A API de extensões
-permanece na revisão 1, incluindo o contrato de áudio, já persistido pelo backend.
+```dotenv
+PIPEFACIL_MEDIA_BASE_URL=https://seu-worker-de-midias.workers.dev
+PIPEFACIL_MEDIA_UPLOAD_TOKEN=<token-exclusivo-deste-profile>
+```
 
-A atualização vale para novos envios de todos os SDRs que usam o plugin comum.
-Mensagens antigas precisam de reparo separado no backend a partir de suas chaves
-de armazenamento, respeitando o workspace. A atualização não reenvia mensagens.
+A origem também pode ficar em `gateway.platforms.pipefacil.extra.media_base_url`.
+O token é um segredo do profile e não pode ser informado pelo modelo. Cada token
+permite upload no namespace definido pelo operador. O bucket permanece privado;
+quem possuir o link poderá abrir aquela mídia, sem prazo de expiração. Use somente
+para materiais comerciais aprovados. Não aplique uma política de expiração aos
+objetos: eles devem continuar disponíveis enquanto o histórico precisar deles.
+Revogar um token impede novos uploads, sem apagar links de mensagens já enviadas.
+
+Links externos do `SOUL.md` são baixados com DNS público fixado, sem redirects/proxies,
+validação de MIME/assinatura e limite de 16 MiB. O cache é isolado por profile, origens
+CRM/R2, credenciais, conteúdo, nome e MIME. Recibos temporários antigos não são
+reutilizados. O health informa `mediaPersistenceRevision: 2`.
+
+Sem configuração ou com falha no upload, a mídia não é enviada; respostas de texto
+continuam disponíveis. Resultados incertos mantêm a reconciliação pelo journal. A API
+de extensões permanece na revisão 1, incluindo o contrato de áudio. A correção vale
+para novos envios dos oito SDRs após instalar/configurar o plugin comum em cada um.
+Ela não altera nem reenvia mensagens antigas e não copia anexos recebidos dos leads
+para esse bucket público por link.
 
 ### Código específico de cada SDR (0.4.6)
 

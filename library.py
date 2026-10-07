@@ -14,7 +14,7 @@ import httpx
 from .media import _valid_file_prefix, normalize_mime, resolve_media_link
 from .network import PublicTransport
 
-MAX_BYTES = 16 * 1024 * 1024  # Existing public CRM upload contract.
+MAX_BYTES = 16 * 1024 * 1024  # Shared commercial media upload limit.
 MIMES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf",
                   "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                   "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

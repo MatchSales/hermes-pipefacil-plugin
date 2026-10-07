@@ -34,7 +34,6 @@ from .api import (
     fetch_conversation_history,
     normalize_api_base_url,
     send_message,
-    upload_message_media,
     media_url,
 )
 from .media import InboundMediaResult, download_inbound_media, clean_cache
@@ -42,6 +41,7 @@ from .inbox import DEFAULT_MAX_MESSAGE_AGE_SECONDS, fresh_messages
 from .security import AdmissionError, decode_body, verify, parse_json, ADMIN, ADMIN_REPLY, public_text
 from .state import State, StateError, Full, Conflict, digest
 from .library import read_asset, read_remote_asset
+from .storage import upload_message_media, validate_receipt
 from .crm import CRM
 from .extensions import Extensions, ExtensionError, API_REVISION
 from .public import StoredAudio
@@ -219,6 +219,7 @@ class PipefacilAdapter(BasePlatformAdapter):
         self.reset_allowed_users.discard("")
         from hermes_constants import get_hermes_home
         self.profile_home = Path(get_hermes_home()).resolve()
+        self.media_base_url = get_scoped_secret("PIPEFACIL_MEDIA_BASE_URL", "") or extra.get("media_base_url", "")
         self.extensions = Extensions(self.profile_home, extra.get("extension_plugins", []))
         self._app = None
         self._runner = None
@@ -409,7 +410,8 @@ class PipefacilAdapter(BasePlatformAdapter):
         stored = message.pop("_stored_audio", None)
         with self._runtime_scope():
             key = get_scoped_secret("PIPEFACIL_API_KEY", "") or ""
-            secrets = (key, self.webhook_secret, self.webhook_secret_next, get_scoped_secret("OPENAI_API_KEY", ""))
+            media_token = get_scoped_secret("PIPEFACIL_MEDIA_UPLOAD_TOKEN", "") or ""
+            secrets = (key, media_token, self.webhook_secret, self.webhook_secret_next, get_scoped_secret("OPENAI_API_KEY", ""))
         if message.get("type") == "text":
             if getattr(self, "extensions", None) is not None:
                 try:
@@ -458,22 +460,22 @@ class PipefacilAdapter(BasePlatformAdapter):
             def write():
                 try:
                     media_link = message.get("mediaLink")
-                    media_asset_id = None
                     filename, mime = message.get("filename"), message.get("mimeType")
                     if stored is not None:
                         media_link = media_url(api_key=key, base_url=self.api_base_url, storage_key=stored.storage_key)
                     if asset_data:
                         asset, body, content_hash = asset_data
-                        cache_key = digest(["chat-media-asset-v1", str(self.profile_home), self.api_base_url,
+                        cache_key = digest(["r2-chat-media-v1", str(self.profile_home), self.api_base_url, self.media_base_url,
+                                            hashlib.sha256(media_token.encode()).hexdigest(),
                                             hashlib.sha256(key.encode()).hexdigest(), content_hash, asset.filename, asset.mime])
                         receipt = self.state.upload(cache_key)
                         if receipt is None:
                             receipt = self.effect(job, "upload", {"cache": cache_key}, lambda: upload_message_media(
-                                api_key=key, base_url=self.api_base_url, filename=asset.filename, mime_type=asset.mime, body=body), active=active)
+                                token=media_token, base_url=self.media_base_url, filename=asset.filename, mime_type=asset.mime, body=body), active=active)
                             self.state.upload(cache_key, receipt)
-                        media_asset_id = receipt["assetId"]
-                        media_link = None
-                        filename, mime = receipt.get("filename") or asset.filename, receipt.get("contentType") or asset.mime
+                        validate_receipt(receipt, base_url=self.media_base_url, filename=asset.filename, mime_type=asset.mime, body=body)
+                        media_link = receipt["url"]
+                        filename, mime = asset.filename, asset.mime
                     if not active() or self._closing:
                         raise PipefacilAPIError("The Pipefacil turn is no longer active.")
                     # Revalidate after upload/URL resolution so a reassigned lead cannot
@@ -487,7 +489,7 @@ class PipefacilAdapter(BasePlatformAdapter):
                     # own journal, but allow a truthful text reply about the failure.
                     raise PipefacilAPIError(str(exc), definite_rejection=True) from None
                 envelope = send_message(api_key=key, base_url=self.api_base_url, recipient=destination["phone"],
-                    message_type=message["type"], text=message.get("text"), media_link=media_link, media_asset_id=media_asset_id,
+                    message_type=message["type"], text=message.get("text"), media_link=media_link,
                     caption=message.get("caption"), filename=filename, mime_type=mime,
                     channel_id=destination.get("channel_id") or None,
                     sender_phone_number_id=destination.get("phone_number_id") or None)
@@ -561,7 +563,7 @@ class PipefacilAdapter(BasePlatformAdapter):
     async def _handle_health(self, request):
         from aiohttp import web
         contract = {"pluginVersion": __version__, "guidanceRevision": SHARED_GUIDANCE_REVISION,
-                    "leadAdmissionRevision": LEAD_GATE_REVISION, "mediaPersistenceRevision": 1, "extensionApiRevision": API_REVISION,
+                    "leadAdmissionRevision": LEAD_GATE_REVISION, "mediaPersistenceRevision": 2, "extensionApiRevision": API_REVISION,
                     "capabilities": {"text": True, "crmTools": True, "inboundMedia": True, "outboundMedia": True}}
         try:
             extensions = getattr(self, "extensions", None)

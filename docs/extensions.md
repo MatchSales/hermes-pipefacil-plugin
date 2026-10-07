@@ -84,13 +84,15 @@ Health reports `extensionApiRevision` and configured extension names/versions.
 Private pause and outbox data can remain in their existing profile-local paths;
 separating source code does not require moving or deleting durable state.
 
-From platform 0.5.0, extensions delegate image/document sends to
+From platform 0.5.1, extensions delegate image/document sends to
 `adapter.send_api_message` with a profile `fileId` or an exact URL approved in that
-profile's `SOUL.md`. The shared adapter copies the bytes into a permanent CRM media
-asset and sends its id. Do not implement custom-field upload/temporary-URL delivery
+profile's `SOUL.md`. The shared adapter copies the bytes into private R2 storage
+and sends an immutable capability URL through the existing CRM `mediaLink` contract. Do not implement custom-field upload/temporary-URL delivery
 inside business extensions. `api.upload_media` and `stored_audio` retain their
 revision 1 compatibility contract for voice extensions; audio persistence remains
-owned by the backend. The backend conversation-media upload route must ship first.
+owned by the backend. Configure `PIPEFACIL_MEDIA_BASE_URL` and a profile-specific
+`PIPEFACIL_MEDIA_UPLOAD_TOKEN` before image/document delivery; extensions do not
+receive storage credentials or choose namespaces.
 
 ## Terminal handoff
 
