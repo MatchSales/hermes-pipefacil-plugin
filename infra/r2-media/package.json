@@ -1,0 +1,6 @@
+{
+  "name": "hermes-sdr-media",
+  "private": true,
+  "type": "module",
+  "scripts": {"test": "node --test worker.test.mjs"}
+}

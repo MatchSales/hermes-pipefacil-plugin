@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.1
+
+- Store approved outbound images/documents in private R2 and send stable HTTPS `mediaLink` URLs through the existing CRM API. No backend change or new CRM endpoint required.
+- Include the media gateway, immutable capability URLs, profile-specific upload tokens, bounded validation, streamed reads, range/HEAD/ETag support and deployment instructions in this plugin repository.
+- Isolate and validate upload receipts by profile, CRM/storage origins, credentials, content, filename and MIME; exclude legacy temporary receipts. Preserve effect journaling, ownership revalidation and ordered handoff.
+- Validate approved external downloads with public DNS pinning, no redirects/proxies and a 16 MiB limit. Protect upload credentials from public text/captions.
+- Require R2 gateway configuration for media sends; fail before the message POST with no expiring-link fallback. Report `mediaPersistenceRevision: 2`. Extension API revision 1, text and stored audio remain compatible.
+- Cover eight profiles, receipt reuse/isolation, actual binary HTTP delivery, gateway access control and explicit/ambiguous failures. Does not rewrite or resend historical messages.
+
 ## 0.5.0
 
 - Store all outbound images/documents as permanent conversation media assets, including approved external URLs, and send `mediaAssetId` instead of a temporary custom-field link. Applies to every profile using the shared adapter.
