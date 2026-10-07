@@ -13,7 +13,7 @@ sends the final answer through the Pipefacil API, and provides a narrowly scoped
 - Replies to the lead through the Pipefacil API.
 - Registers `pipefacil_send_messages` to send up to two additional text, image, or document messages before Hermes sends its final answer automatically.
 - Downloads current images/documents/audio and uses Hermes' native vision, document readers and transcription.
-- Lists approved profile-local `media/` assets, uploads them through the existing CRM API and resolves fresh temporary URLs before sending.
+- Lists approved profile-local `media/` assets and stores images/documents as permanent CRM media assets before sending.
 - Durably queues admitted jobs, orders preparation/model execution per conversation and journals HTTP effects before attempting them.
 - Falls back to the local Hermes conversation context if Pipefacil history cannot be loaded.
 - Treats a standalone `/reset` message as a Hermes command, removes the finished local session transcript,
@@ -193,8 +193,10 @@ or `document`):
 - label: Team photo | type: image | url: https://bucket.example.com/team.jpg?signature=...
 ```
 
-The plugin accepts only an exact type and URL match from the active profile's `SOUL.md`. Signed links
-must remain valid and accessible to WhatsApp when sent; an expired link is reported as an API failure.
+The plugin accepts only an exact type and URL match from the active profile's `SOUL.md`.
+The source URL must remain accessible when the plugin copies its bytes to the CRM;
+an expired source prevents the send. Once sent, chat display uses the CRM's permanent
+media reference rather than the source URL.
 
 ## Configure the webhook
 
@@ -355,3 +357,27 @@ O health informa versão, revisão e capacidades. Os nomes e limites específico
 Keep client code in a separate native plugin and declare it in `extra.extension_plugins`.
 The shared core checks required dependencies and scoped tool/lifecycle contracts. See
 [extension API revision 1](docs/extensions.md) for configuration, ordered handoff and stored audio.
+
+## Persistent chat media (0.5.0)
+
+All profiles use the same image/document delivery path: upload to
+`POST /api/v1/conversations/media`, then send the returned `assetId` as `mediaAssetId`
+to `POST /api/v1/conversations/messages`. Approved external URLs are downloaded with
+public DNS pinning, no redirects/proxies, MIME/signature validation and a 16 MiB bound,
+then uploaded through the same path. The model still selects `fileId` or an approved
+URL; it cannot supply a media asset id.
+
+The CRM stores the permanent reference and renews the private storage URL when the
+chat opens it. Upload receipts are cached by profile, API origin, credential, content,
+filename and MIME. Legacy custom-field receipts are excluded from the new cache.
+Health reports `mediaPersistenceRevision: 1` for fleet verification.
+
+**Deploy the backend conversation-media API before upgrading the plugin.** If the route
+is absent or upload fails, no image/document message is posted; there is no fallback to
+the expiring link. Ambiguous uploads retain the existing reconciliation requirement.
+Text delivery remains available. Extension API revision 1 and its stored-audio contract
+remain compatible; audio is already persisted by the backend's audio normalization path.
+
+This update fixes new sends for every profile using the shared plugin. It does not
+rewrite historical CRM messages or resend customer messages. Historical links need a
+separate backend repair using their workspace-scoped storage keys.

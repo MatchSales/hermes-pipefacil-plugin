@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
+
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms._shared import get_scoped_secret
 from gateway.platforms.base import BasePlatformAdapter, SendResult
@@ -32,14 +34,14 @@ from .api import (
     fetch_conversation_history,
     normalize_api_base_url,
     send_message,
-    upload_media,
+    upload_message_media,
     media_url,
 )
 from .media import InboundMediaResult, download_inbound_media, clean_cache
 from .inbox import DEFAULT_MAX_MESSAGE_AGE_SECONDS, fresh_messages
 from .security import AdmissionError, decode_body, verify, parse_json, ADMIN, ADMIN_REPLY, public_text
 from .state import State, StateError, Full, Conflict, digest
-from .library import read_asset
+from .library import read_asset, read_remote_asset
 from .crm import CRM
 from .extensions import Extensions, ExtensionError, API_REVISION
 from .public import StoredAudio
@@ -433,13 +435,20 @@ class PipefacilAdapter(BasePlatformAdapter):
 
         def deliver():
             asset_data = None
+            if context is not None and context.get("deal_seq") and self.crm.member_user_id:
+                self.crm.authorized(context, key)
             if message.get("fileId"):
                 try:
                     asset_data = read_asset(self.profile_home, message["fileId"], message["type"])
                 except (OSError, ValueError):
                     raise PipefacilAPIError("The approved profile file is unavailable or invalid.", definite_rejection=True) from None
-            if context is not None and context.get("deal_seq") and self.crm.member_user_id:
-                self.crm.authorized(context, key)
+            elif message.get("type") in {"image", "document"}:
+                try:
+                    asset_data = read_remote_asset(self.profile_home, message["mediaLink"], message["type"],
+                                                   message.get("filename"), message.get("mimeType"))
+                except (OSError, ValueError, httpx.HTTPError):
+                    raise PipefacilAPIError("The approved profile media could not be downloaded or validated.",
+                                            definite_rejection=True) from None
             if getattr(self, "extensions", None) is not None:
                 self.extensions.before_send(adapter=self, context=context, message=dict(message))
             arguments = {**message, "destination": destination}
@@ -449,19 +458,22 @@ class PipefacilAdapter(BasePlatformAdapter):
             def write():
                 try:
                     media_link = message.get("mediaLink")
+                    media_asset_id = None
                     filename, mime = message.get("filename"), message.get("mimeType")
                     if stored is not None:
                         media_link = media_url(api_key=key, base_url=self.api_base_url, storage_key=stored.storage_key)
                     if asset_data:
                         asset, body, content_hash = asset_data
-                        cache_key = digest([str(self.profile_home), self.api_base_url, hashlib.sha256(key.encode()).hexdigest(), content_hash])
+                        cache_key = digest(["chat-media-asset-v1", str(self.profile_home), self.api_base_url,
+                                            hashlib.sha256(key.encode()).hexdigest(), content_hash, asset.filename, asset.mime])
                         receipt = self.state.upload(cache_key)
                         if receipt is None:
-                            receipt = self.effect(job, "upload", {"cache": cache_key}, lambda: upload_media(
+                            receipt = self.effect(job, "upload", {"cache": cache_key}, lambda: upload_message_media(
                                 api_key=key, base_url=self.api_base_url, filename=asset.filename, mime_type=asset.mime, body=body), active=active)
                             self.state.upload(cache_key, receipt)
-                        media_link = media_url(api_key=key, base_url=self.api_base_url, storage_key=receipt["key"])
-                        filename, mime = asset.filename, asset.mime
+                        media_asset_id = receipt["assetId"]
+                        media_link = None
+                        filename, mime = receipt.get("filename") or asset.filename, receipt.get("contentType") or asset.mime
                     if not active() or self._closing:
                         raise PipefacilAPIError("The Pipefacil turn is no longer active.")
                     # Revalidate after upload/URL resolution so a reassigned lead cannot
@@ -475,7 +487,7 @@ class PipefacilAdapter(BasePlatformAdapter):
                     # own journal, but allow a truthful text reply about the failure.
                     raise PipefacilAPIError(str(exc), definite_rejection=True) from None
                 envelope = send_message(api_key=key, base_url=self.api_base_url, recipient=destination["phone"],
-                    message_type=message["type"], text=message.get("text"), media_link=media_link,
+                    message_type=message["type"], text=message.get("text"), media_link=media_link, media_asset_id=media_asset_id,
                     caption=message.get("caption"), filename=filename, mime_type=mime,
                     channel_id=destination.get("channel_id") or None,
                     sender_phone_number_id=destination.get("phone_number_id") or None)
@@ -549,7 +561,7 @@ class PipefacilAdapter(BasePlatformAdapter):
     async def _handle_health(self, request):
         from aiohttp import web
         contract = {"pluginVersion": __version__, "guidanceRevision": SHARED_GUIDANCE_REVISION,
-                    "leadAdmissionRevision": LEAD_GATE_REVISION, "extensionApiRevision": API_REVISION,
+                    "leadAdmissionRevision": LEAD_GATE_REVISION, "mediaPersistenceRevision": 1, "extensionApiRevision": API_REVISION,
                     "capabilities": {"text": True, "crmTools": True, "inboundMedia": True, "outboundMedia": True}}
         try:
             extensions = getattr(self, "extensions", None)

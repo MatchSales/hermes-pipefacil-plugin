@@ -84,6 +84,14 @@ Health reports `extensionApiRevision` and configured extension names/versions.
 Private pause and outbox data can remain in their existing profile-local paths;
 separating source code does not require moving or deleting durable state.
 
+From platform 0.5.0, extensions delegate image/document sends to
+`adapter.send_api_message` with a profile `fileId` or an exact URL approved in that
+profile's `SOUL.md`. The shared adapter copies the bytes into a permanent CRM media
+asset and sends its id. Do not implement custom-field upload/temporary-URL delivery
+inside business extensions. `api.upload_media` and `stored_audio` retain their
+revision 1 compatibility contract for voice extensions; audio persistence remains
+owned by the backend. The backend conversation-media upload route must ship first.
+
 ## Terminal handoff
 
 A fixed business tool delegates to `handoff.execute(adapter, chat_id, context,

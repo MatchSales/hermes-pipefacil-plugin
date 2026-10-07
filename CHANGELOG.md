@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0
+
+- Store all outbound images/documents as permanent conversation media assets, including approved external URLs, and send `mediaAssetId` instead of a temporary custom-field link. Applies to every profile using the shared adapter.
+- Isolate persistent upload caches by profile, API origin, credential, content, filename and MIME; exclude legacy receipts. Preserve effect journaling, ownership revalidation and ordered handoff.
+- Add bounded, validated downloads for approved external images/documents with public DNS pinning and no redirects/proxies.
+- Require the backend `POST /api/v1/conversations/media` API before upgrading. Fail before sending media when unavailable, with no expiring-link fallback. Report `mediaPersistenceRevision: 1` in health. Existing revision 1 business extensions and stored audio remain compatible.
+- Cover eight profiles, permanent-id reuse, actual multipart HTTP delivery and explicit/ambiguous failures. Historical CRM messages require a separate backend repair.
+
 ## 0.4.6
 
 - Add revision 1 of profile-owned extensions through native scoped Hermes hooks: required dependencies, lifecycle callbacks, owned toolsets, optional disabling of common tools, and health metadata. Missing or incompatible extensions fail closed.

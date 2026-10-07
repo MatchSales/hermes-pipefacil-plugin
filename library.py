@@ -7,8 +7,12 @@ import mimetypes
 import os
 from pathlib import Path
 import stat
+from urllib.parse import unquote, urlsplit
 
-from .media import _valid_file_prefix
+import httpx
+
+from .media import _valid_file_prefix, normalize_mime, resolve_media_link
+from .network import PublicTransport
 
 MAX_BYTES = 16 * 1024 * 1024  # Existing public CRM upload contract.
 MIMES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf",
@@ -16,6 +20,42 @@ MIMES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp", "applic
                   "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                   "application/vnd.ms-powerpoint", "application/vnd.openxmlformats-officedocument.presentationml.presentation",
                   "text/csv", "text/plain"})
+
+
+@dataclass(frozen=True)
+class RemoteUpload:
+    filename: str
+    mime: str
+
+
+def read_remote_asset(home, url, kind, filename=None, mime=None):
+    """Copy only this profile's approved HTTPS image/document, with pinned public DNS."""
+    if resolve_media_link(home, kind=kind, url=url) is None:
+        raise ValueError("media_not_in_profile")
+    with httpx.Client(timeout=25.0, follow_redirects=False, trust_env=False, transport=PublicTransport()) as client:
+        with client.stream("GET", url) as response:
+            if not 200 <= response.status_code < 300:
+                raise ValueError(f"Approved media download returned HTTP {response.status_code}.")
+            length = response.headers.get("Content-Length")
+            if length is not None and (not length.isdecimal() or not 0 < int(length) <= MAX_BYTES):
+                raise ValueError("invalid_media_size")
+            actual_mime = normalize_mime(response.headers.get("Content-Type"))
+            if actual_mime in {"", "application/octet-stream", "binary/octet-stream"}:
+                actual_mime = normalize_mime(mime)
+            if actual_mime not in MIMES or ("image" if actual_mime.startswith("image/") else "document") != kind:
+                raise ValueError("invalid_media_type")
+            chunks, size = [], 0
+            for chunk in response.iter_bytes(64 * 1024):
+                size += len(chunk)
+                if size > MAX_BYTES:
+                    raise ValueError("invalid_media_size")
+                chunks.append(chunk)
+            body = b"".join(chunks)
+            if not body or not _valid_file_prefix(body[:64], actual_mime):
+                raise ValueError("invalid_media_content")
+    name = Path(str(filename or unquote(urlsplit(url).path))).name
+    name = "".join(c for c in name if c.isprintable() and c not in '\\"')[:200] or "media.bin"
+    return RemoteUpload(name, actual_mime), body, hashlib.sha256(body).hexdigest()
 
 
 @dataclass(frozen=True)
