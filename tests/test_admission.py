@@ -69,3 +69,24 @@ def test_reservation_is_released_on_cancellation_path(tmp_path):
     with pytest.raises(module.AdmissionConflict):
         control.leave()
     assert control.status()["active"] == 0
+
+
+def test_private_credential_install_requires_drain_and_retirement_stops_effects(tmp_path, monkeypatch):
+    from test_http_runtime import adapter
+    import hashlib
+    instance = adapter(tmp_path, monkeypatch)
+    module = control_module()
+    instance._admission_control = module.ProfileAdmissionControl(tmp_path, True)
+    control = instance._admission_control
+    control.set_closed(False, 0)
+    assert control.enter()
+    control.set_closed(True, 1)
+    with pytest.raises(module.AdmissionConflict):
+        instance.install_managed_credentials("new-key", "new-secret", 2)
+    control.leave()
+    installed = instance.install_managed_credentials("new-key", "new-secret", 2)
+    assert installed["credentialFingerprint"] == hashlib.sha256(b"new-key").hexdigest()
+    assert installed["closed"]
+    instance.retire_managed_profile(2)
+    assert instance._closing and not instance.api_key and not instance.webhook_secret
+    instance.state.close()

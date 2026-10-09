@@ -768,6 +768,26 @@ class PipefacilAdapter(BasePlatformAdapter):
         control = getattr(self, "_admission_control", None)
         return control.status() if control is not None else {"managed": False, "closed": False}
 
+    def retire_managed_profile(self, expected_version):
+        """Close this drained adapter before native profile unserving; keep durable history."""
+        with self._admission_control.configuration_scope(expected_version):
+            self._closing = True
+            self.api_key = ""
+            self.webhook_secret = ""
+            self.webhook_secret_next = ""
+
+    def install_managed_credentials(self, api_key, webhook_secret, expected_version):
+        """Private admin capability; caller atomically installed profile .env first."""
+        control = getattr(self, "_admission_control", None)
+        if control is None or not api_key or not webhook_secret:
+            raise ValueError("Managed credentials required")
+        with control.configuration_scope(expected_version):
+            self.api_key = api_key
+            self.webhook_secret = webhook_secret
+            self.webhook_secret_next = ""
+            return {"credentialFingerprint": hashlib.sha256(self.api_key.encode()).hexdigest(),
+                    "managementRevision": 2, **control.status()}
+
     def set_admission(self, closed, expected_version):
         """Trusted in-process admin capability; never registered as an agent tool."""
         control = getattr(self, "_admission_control", None)
