@@ -244,3 +244,25 @@ def test_managed_handoff_only_pauses_and_preserves_effect_receipt(tmp_path, monk
         asyncio.run(scenario())
     finally:
         value.state.close()
+
+
+@pytest.mark.parametrize("kind", ["image", "document", "audio"])
+def test_managed_media_uses_execution_endpoint_and_v2_body_without_destination(monkeypatch, kind):
+    managed, _, api, _ = modules()
+    token = managed.CURRENT.set({"execution": {"executionId": "media-exec"}})
+    calls = []
+    def request(**kwargs):
+        calls.append(kwargs)
+        if kwargs["method"] == "GET":
+            raise api.PipefacilAPIError("Absent", status_code=404)
+        return {"data": {"status": "APPLIED", "result": {"id": "media-receipt"}}}
+    monkeypatch.setattr(api, "request_json", request)
+    try:
+        assert api.send_message(api_key="test",base_url="https://crm.invalid",recipient="untrusted",
+            channel_id="untrusted",message_type=kind,media_link="https://media.invalid/file",caption="File")["data"]["id"] == "media-receipt"
+        write = calls[-1]
+        assert write["path"] == "/api/v1/ai-agent/executions/media-exec/messages"
+        assert write["payload"] == {"type":kind,"mediaUrl":"https://media.invalid/file","caption":"File"}
+        assert write["idempotency_key"]
+    finally:
+        managed.CURRENT.reset(token)
