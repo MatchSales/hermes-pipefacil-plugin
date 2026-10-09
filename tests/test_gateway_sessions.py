@@ -407,6 +407,69 @@ def test_gateway_operator_notices_are_not_sent_to_leads(multiplex, monkeypatch):
     assert sent == []
 
 
+@pytest.mark.parametrize("status_code", [None, 401, 422, 429, 500])
+def test_failed_customer_delivery_never_retries_or_sends_diagnostics(multiplex, monkeypatch, caplog, status_code):
+    m = multiplex
+    adapter = m.adapters["sdr-a"]
+    sent = []
+
+    async def fail(chat_id, message):
+        sent.append((chat_id, message))
+        raise m.module.PipefacilAPIError("Provider delivery failed", status_code=status_code)
+
+    monkeypatch.setattr(adapter, "send_api_message", fail)
+    with m.turn("sdr-a"):
+        result = asyncio.run(adapter._send_with_retry(
+            m.chat_id, "Que bom! Você já revende uniformes ou está começando agora?",
+            metadata={"notify": True}, max_retries=3, base_delay=0,
+        ))
+    assert not result.success and result.error == "Provider delivery failed"
+    assert sent == [(m.chat_id, {
+        "type": "text", "text": "Que bom! Você já revende uniformes ou está começando agora?",
+    })]
+    assert "Message delivery failed" in caplog.text
+    assert "final_response_sent" not in adapter._active_turn_context[m.chat_id][0]
+
+
+def test_customer_reply_and_receipt_survive_delivery_policy(multiplex, monkeypatch):
+    m = multiplex
+    adapter = m.adapters["sdr-a"]
+    sent = []
+
+    async def send(chat_id, message):
+        sent.append(message)
+        return {"message_id": "accepted-customer-reply"}
+
+    monkeypatch.setattr(adapter, "send_api_message", send)
+    with m.turn("sdr-a"):
+        result = asyncio.run(adapter._send_with_retry(m.chat_id, "Como posso ajudar?", metadata={"notify": True}))
+    assert result.success and result.message_id == "accepted-customer-reply"
+    assert sent == [{"type": "text", "text": "Como posso ajudar?"}]
+    assert adapter._active_turn_context[m.chat_id][0]["final_response_sent"] is True
+
+
+def test_gateway_fallback_is_blocked_inside_a_live_customer_turn(multiplex, monkeypatch):
+    m = multiplex
+    adapter = m.adapters["sdr-a"]
+    sent = []
+
+    async def send(chat_id, message):
+        sent.append(message)
+        return {"message_id": "must-not-send"}
+
+    monkeypatch.setattr(adapter, "send_api_message", send)
+    with m.turn("sdr-a"):
+        result = asyncio.run(adapter._send_plain_fallback(
+            m.chat_id, "Original reply", reply_to=None, metadata={"notify": True},
+        ))
+        if hasattr(adapter, "emit_warning"):
+            assert asyncio.run(adapter.emit_warning(
+                m.chat_id, "Internal provider error", metadata={"notify": True},
+            )) is None
+    assert not result.success and sent == []
+    assert adapter.warning_notifications_enabled() is False
+
+
 @pytest.mark.parametrize("storage_error", [False, True])
 def test_connection_checks_receipt_storage_before_opening_webhook(multiplex, monkeypatch, storage_error):
     import sqlite3

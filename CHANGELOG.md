@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Keep delivery failures out of customer chats, including errors during an active reply. Disable the gateway's generic resend, formatting banner and exhausted-retry notice; preserve the failed result, internal logs, effect journal and native delivery metrics where supported.
+- Disable channel warning presentation independently of profile settings. Uncertain WhatsApp delivery remains an operator reconciliation task.
+
 ## 0.5.1
 
 - Store approved outbound images/documents in private R2 and send stable HTTPS `mediaLink` URLs through the existing CRM API. No backend change or new CRM endpoint required.

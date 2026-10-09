@@ -25,6 +25,7 @@ import httpx
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms._shared import get_scoped_secret
+from gateway.platforms import base as gateway_base
 from gateway.platforms.base import BasePlatformAdapter, SendResult
 from gateway.platforms.event import MessageEvent, MessageType
 
@@ -58,6 +59,8 @@ from .reset import (
 )
 
 logger = logging.getLogger(__name__)
+# Keep native delivery metrics on newer hosts; Hermes 0.21.5 has no recorder.
+_records_delivery = getattr(gateway_base, "records_delivery", lambda method: method)
 
 DEFAULT_PORT = 8645
 DEFAULT_PATH = "/events/message-received"
@@ -555,6 +558,30 @@ class PipefacilAdapter(BasePlatformAdapter):
 
     async def _send_control_reply(self, chat_id: str, content: str) -> SendResult:
         return await self.send(chat_id, content, metadata={"_pipefacil_control_reply": _CONTROL_REPLY})
+
+    @_records_delivery
+    async def _send_with_retry(
+        self, chat_id: str, content: str, reply_to: str | None = None, metadata: Any = None,
+        max_retries: int = 2, base_delay: float = 2.0,
+    ) -> SendResult:
+        """Send once through the journal; never turn a transport failure into customer text.
+
+        A failed HTTP response can follow a successful WhatsApp delivery. The journal
+        owns that uncertainty; Hermes' generic retry/fallback can duplicate the message
+        and append operational diagnostics to a live customer reply.
+        """
+        return await self.send(chat_id, content, reply_to=reply_to, metadata=metadata)
+
+    async def _send_plain_fallback(
+        self, chat_id: str, content: str, *, reply_to: str | None, metadata: Any,
+    ) -> SendResult:
+        """Defend direct fallback calls as well as the normal gateway delivery path."""
+        logger.warning("[pipefacil] Suppressed gateway delivery fallback; inspect the private journal")
+        return SendResult(success=False, error="Pipefacil delivery fallback is disabled; inspect the private journal.")
+
+    def warning_notifications_enabled(self, logical_platform=None, *, chat_id=None, metadata=None) -> bool:
+        """Pipefacil is a customer channel, irrespective of the host's warning settings."""
+        return False
 
     async def get_chat_info(self, chat_id: str) -> dict[str, Any]:
         destination = self._destinations.get(str(chat_id), {})

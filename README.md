@@ -322,6 +322,13 @@ reset replies remain available to configured test numbers. On hosts that expose
 `notify_missing_home_channel`, the plugin also disables that notice at registration.
 For public profiles, set `onboarding.profile_build: "off"` to disable personal-profile onboarding.
 
+Delivery failures stay in the gateway logs and private effect journal. The adapter sends each
+final answer once and disables Hermes' generic retries, plain-text fallback banners, and
+delivery-failure notices. A provider can deliver a message before returning an error, so an
+uncertain send requires operator reconciliation rather than an automatic resend. On newer
+hosts, channel warnings are disabled regardless of the profile's presentation setting; native
+delivery metrics still record the actual success or failure.
+
 ## Inbound media
 
 Only attachments in the current webhook messages are downloaded. Downloads require HTTPS, do not follow
