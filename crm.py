@@ -4,7 +4,7 @@ import math
 import re
 from datetime import datetime
 
-from . import api
+from . import api, managed
 from .state import canonical, StateError
 
 
@@ -42,7 +42,8 @@ class CRM:
         # The backend legitimately delivers conversations with no open deals, or
         # legacy agents without a member. Preserve those chats; writes always need
         # an operator-configured user id and current ownership.
-        if self.member_user_id and (writing or str(lead.get("status")).lower() == "open"):
+        from .managed import current
+        if not current() and self.member_user_id and (writing or str(lead.get("status")).lower() == "open"):
             if lead.get("responsibleUserId") != self.member_user_id:
                 raise api.PipefacilAPIError("The deal is no longer assigned to this agent.")
         return lead
@@ -61,7 +62,7 @@ class CRM:
                 "writableFields": sorted(self.fields) if self.member_user_id else [],
                 "writableCustomFields": sorted(self.custom_fields) if self.member_user_id else [],
                 "allowedStages": self.allowed_stages(lead, key) if self.member_user_id else [],
-                "handoffConfigured": bool(self.member_user_id and self.handoff_user_id
+                "handoffConfigured": bool(managed.current()) or bool(self.member_user_id and self.handoff_user_id
                                            and self.handoff_user_id != self.member_user_id)}
 
     def validate(self, properties):

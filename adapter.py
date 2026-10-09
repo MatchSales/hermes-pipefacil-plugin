@@ -230,6 +230,7 @@ class PipefacilAdapter(BasePlatformAdapter):
         self.media_base_url = get_scoped_secret("PIPEFACIL_MEDIA_BASE_URL", "") or extra.get("media_base_url", "")
         self.extensions = Extensions(self.profile_home, extra.get("extension_plugins", []))
         self._app = None
+        self._loop = None
         self._runner = None
         self._inbound_tasks: set[asyncio.Task] = set()
         self._destinations: dict[str, dict[str, str]] = {}
@@ -306,9 +307,10 @@ class PipefacilAdapter(BasePlatformAdapter):
         if secondary and self.gateway_runner and getattr(self.gateway_runner.config, "multiplex_profiles", False):
             self._shared_listener_profile = secondary
 
+        self._loop = asyncio.get_running_loop()
         try:
             from gateway.platforms.shared_ingress import bind_listener
-            self._runner = await bind_listener(
+            self._runner = None if self._admission_control.enabled else await bind_listener(
                 self,
                 self._app,
                 self.host,
@@ -332,6 +334,9 @@ class PipefacilAdapter(BasePlatformAdapter):
             return self._fail("extension_unavailable", "A required profile extension could not start")
         self._mark_connected()
         self._closing = False
+        if self._admission_control.enabled:
+            for execution_id in self.state.pending_execution_reports():
+                self._schedule_execution_report(execution_id)
         for chat in pending_chats:
             self._schedule(chat)
         if self._runner is not None:
@@ -626,6 +631,8 @@ class PipefacilAdapter(BasePlatformAdapter):
     async def _handle_webhook(self, request):
         from aiohttp import web
         with self._runtime_scope():
+            if self.management_status()["managed"]:
+                return web.json_response({"error": "managed_profile_requires_execution_v2"}, status=403)
             if self._closing or self._ready_error:
                 return web.json_response({"error": "gateway_not_ready"}, status=503)
             if request.content_length is not None and request.content_length > MAX_COMPRESSED_BODY_BYTES:
@@ -641,6 +648,8 @@ class PipefacilAdapter(BasePlatformAdapter):
                 return web.json_response({"error": str(exc)}, status=exc.status)
             except OSError:
                 return web.json_response({"error": "invalid_request_body"}, status=400)
+            if isinstance(payload, dict) and "_pipefacil_managed" in payload:
+                return web.json_response({"error": "private_context_not_allowed"}, status=400)
             if not isinstance(payload, dict) or payload.get("type") != "message.received":
                 return web.json_response({"status": "ignored", "reason": "unsupported event"}, status=200)
             control = getattr(self, "_admission_control", None)
@@ -736,9 +745,11 @@ class PipefacilAdapter(BasePlatformAdapter):
                                                 "phone_number_id": str(channel.get("phoneNumberId") or "")}
                     token = _INGRESS_JOB.set((self, job_id))
                     try:
-                        with self._runtime_scope():
-                            async with asyncio.timeout(self.turn_timeout):
-                                await self._process_event(**kwargs)
+                        from .managed import turn_scope
+                        async with turn_scope(self, kwargs):
+                            with self._runtime_scope():
+                                async with asyncio.timeout(self.turn_timeout):
+                                    await self._process_event(**kwargs)
                         await asyncio.to_thread(self.state.finish, job_id, "completed")
                     except asyncio.CancelledError:
                         await asyncio.to_thread(self.state.finish, job_id, "interrupted", "gateway_stopped")
@@ -750,6 +761,9 @@ class PipefacilAdapter(BasePlatformAdapter):
                     finally:
                         _INGRESS_JOB.reset(token)
                         self._destinations.pop(chat, None)
+                        managed = kwargs["payload"].get("_pipefacil_managed")
+                        if managed:
+                            self._schedule_execution_report(managed["execution"]["executionId"])
                     if time.time() - self._last_maintenance > 300:
                         self._last_maintenance = time.time()
                         await asyncio.to_thread(self.state.prune)
@@ -765,6 +779,20 @@ class PipefacilAdapter(BasePlatformAdapter):
                     queued = db.execute("SELECT 1 FROM jobs WHERE chat=? AND state='queued' LIMIT 1", (chat,)).fetchone()
                 if queued:
                     self._schedule(chat)
+
+    def _schedule_execution_report(self, execution_id):
+        from .managed import report
+        task = asyncio.create_task(report(self, execution_id), name="pipefacil-receipt")
+        self._inbound_tasks.add(task)
+        task.add_done_callback(self._inbound_task_finished)
+
+    async def accept_managed_execution(self, command):
+        from .managed import accept
+        with self._runtime_scope():
+            return await accept(self, command)
+
+    def managed_execution_receipt(self, execution_id):
+        return self.state.execution_receipt(execution_id)
 
     def management_status(self):
         control = getattr(self, "_admission_control", None)
@@ -809,7 +837,11 @@ class PipefacilAdapter(BasePlatformAdapter):
             with self.state.db() as db:
                 chats = [row[0] for row in db.execute("SELECT DISTINCT chat FROM jobs WHERE state='queued'")]
             for chat in chats:
-                self._schedule(chat)
+                loop = getattr(self, "_loop", None)
+                if loop is not None and loop.is_running():
+                    loop.call_soon_threadsafe(self._schedule, chat)
+                else:
+                    self._schedule(chat)
         return status
 
     def _inbound_task_finished(self, task: asyncio.Task) -> None:

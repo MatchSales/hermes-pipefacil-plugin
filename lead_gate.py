@@ -27,8 +27,7 @@ def check_lead(*, api_key, base_url, seq, contact):
     responses raise separately; callers must fail closed without replying.
     """
     try:
-        envelope = api.request_json(api_key=api_key, base_url=base_url, method="GET",
-                                    path=f"/api/v1/deals/{seq}")
+        envelope = {"data": api.get_deal(api_key=api_key, base_url=base_url, seq=seq)}
     except api.PipefacilAPIError as exc:
         if exc.status_code == 404:
             return "lead_not_found"
