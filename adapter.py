@@ -49,6 +49,7 @@ from .public import StoredAudio
 from .lead_gate import LEAD_GATE_REVISION, event_deal_seq, check_lead
 from .guidance import PIPEFACIL_CHANNEL_PROMPT
 from .shared_guidance import SHARED_GUIDANCE_REVISION
+from .notices import is_failed_turn_response
 from . import __version__
 from .reset import (
     _history_after_reset,
@@ -532,6 +533,15 @@ class PipefacilAdapter(BasePlatformAdapter):
             logger.info("[pipefacil] Suppressed gateway notice or reply outside a live customer turn")
             return SendResult(success=True)
         context = self._live_turn_context(chat_id)
+        if not control_reply and is_failed_turn_response(content):
+            # notify=True means final delivery, not model success. Native failed
+            # turns arrive here with the provider diagnostic plus a retry notice.
+            # Acknowledge suppression to prevent resend/fallback, but preserve the
+            # failed processing outcome for the private inbox and extension.
+            if context is not None:
+                context["gateway_failure_suppressed"] = True
+            logger.warning("[pipefacil] Suppressed terminal agent failure in a customer conversation")
+            return SendResult(success=True)
         terminal = self.state.handoff(context["job_id"]) if context is not None else None
         if terminal and terminal["state"] in {"pending", "accepted", "uncertain"}:
             # Closing text belongs BEFORE assignment. Successful suppression stops
@@ -1086,6 +1096,8 @@ class PipefacilAdapter(BasePlatformAdapter):
         context = getattr(event, "_pipefacil_turn_context", None)
         if context is not None:
             context["active"] = False
+            if context.get("gateway_failure_suppressed"):
+                outcome = "failure"
         chat_id = str(event.source.chat_id)
         try:
             await self._extension_call("complete", adapter=self, event=event, outcome=outcome, context=context)

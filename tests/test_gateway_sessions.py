@@ -448,6 +448,105 @@ def test_customer_reply_and_receipt_survive_delivery_policy(multiplex, monkeypat
     assert adapter._active_turn_context[m.chat_id][0]["final_response_sent"] is True
 
 
+@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("diagnostic", [
+    "HTTP 503: Unable to verify Daybreak Blue access. Please try again.",
+    "HTTP 429: Rate limit exceeded; run /retry.",
+    "The model timed out; check the provider configuration.",
+    "HTTP 401: Sign in again with hermes auth.",
+])
+def test_terminal_model_failure_is_private_even_in_a_live_reply(multiplex, monkeypatch, caplog, partial, diagnostic):
+    m = multiplex
+    adapter = m.adapters["sdr-a"]
+    from pipefacil_plugin_test.notices import _FAILED_TURN_NOTICES
+    sent = []
+
+    async def send(chat_id, message):
+        sent.append(message)
+        return {"message_id": "must-not-send"}
+
+    monkeypatch.setattr(adapter, "send_api_message", send)
+    notice = _FAILED_TURN_NOTICES[int(partial)]
+    with m.turn("sdr-a"):
+        result = asyncio.run(adapter._send_with_retry(
+            m.chat_id, diagnostic + "\n\n" + notice, metadata={"notify": True},
+        ))
+    context = adapter._active_turn_context[m.chat_id][0]
+    assert result.success and result.message_id is None
+    assert sent == [] and context["gateway_failure_suppressed"] is True
+    assert "final_response_sent" not in context
+    assert "Suppressed terminal agent failure" in caplog.text
+    assert diagnostic not in caplog.text
+
+
+def test_terminal_failure_boundary_is_not_a_generic_error_word_filter(multiplex, monkeypatch):
+    m = multiplex
+    adapter = m.adapters["sdr-a"]
+    sent = []
+
+    async def send(chat_id, message):
+        sent.append(message)
+        return {"message_id": "customer-answer"}
+
+    monkeypatch.setattr(adapter, "send_api_message", send)
+    content = "Se aparecer um erro no CRM, me envie uma captura para eu te ajudar."
+    with m.turn("sdr-a"):
+        assert asyncio.run(adapter.send(m.chat_id, content, metadata={"notify": True})).success
+    assert sent == [{"type": "text", "text": content}]
+
+
+def test_real_hermes_failed_reply_preserves_failed_completion_without_customer_send(multiplex, monkeypatch):
+    from dataclasses import replace
+    from gateway.config import PlatformConfig
+    from gateway.platforms.event import MessageType
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    from pipefacil_plugin_test.notices import _FAILED_TURN_NOTICES
+    m = multiplex
+    token = set_hermes_home_override(str(m.homes["sdr-a"]))
+    adapter = m.module.PipefacilAdapter(PlatformConfig(enabled=True, extra={}))
+    adapter.gateway_runner = SimpleNamespace(session_store=m.store)
+    sent, completed = [], []
+
+    async def send(chat_id, message):
+        sent.append(message)
+        return {"message_id": "must-not-send"}
+
+    async def extension_call(hook, **kwargs):
+        if hook == "complete":
+            completed.append(kwargs["outcome"])
+
+    async def no_obligation(*args):
+        return None
+
+    monkeypatch.setattr(adapter, "send_api_message", send)
+    monkeypatch.setattr(adapter, "_extension_call", extension_call)
+    monkeypatch.setattr(adapter, "_record_delivery_obligation", no_obligation)
+    event = m.module._new_message_event(
+        text="Quero saber mais sobre o CRM", message_type=MessageType.TEXT, user_id="test-contact",
+        source=replace(m.entries["sdr-a"].origin, message_id="model-failure"), message_id="model-failure",
+        allow_gateway_control=False,
+    )
+    event._pipefacil_turn_context = {"deal_seq": 106, "job_id": 1, "media_paths": frozenset()}
+
+    async def scenario():
+        event._pipefacil_done = asyncio.get_running_loop().create_future()
+
+        async def handler(current):
+            return "HTTP 503: Unable to verify Daybreak Blue access.\n\n" + _FAILED_TURN_NOTICES[0]
+
+        adapter.set_message_handler(handler)
+        await adapter.handle_message(event)
+        await asyncio.gather(*list(adapter._session_tasks.values()))
+        assert await event._pipefacil_done == "failure"
+
+    try:
+        asyncio.run(scenario())
+        assert sent == [] and completed == ["failure"]
+        assert adapter._active_turn_context == {}
+    finally:
+        reset_hermes_home_override(token)
+
+
 def test_gateway_fallback_is_blocked_inside_a_live_customer_turn(multiplex, monkeypatch):
     m = multiplex
     adapter = m.adapters["sdr-a"]

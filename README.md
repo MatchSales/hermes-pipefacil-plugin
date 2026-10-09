@@ -322,6 +322,12 @@ reset replies remain available to configured test numbers. On hosts that expose
 `notify_missing_home_channel`, the plugin also disables that notice at registration.
 For public profiles, set `onboarding.profile_build: "off"` to disable personal-profile onboarding.
 
+Terminal model failures are also suppressed during live replies: the gateway's failed-turn
+boundary identifies the entire diagnostic, including provider details and retry instructions.
+Suppression preserves a failed processing outcome in the private inbox and extension callback;
+it does not resend the lead's message or clear conversation history. Ordinary replies remain
+deliverable, including customer-facing discussion of errors in the product.
+
 Delivery failures stay in the gateway logs and private effect journal. The adapter sends each
 final answer once and disables Hermes' generic retries, plain-text fallback banners, and
 delivery-failure notices. A provider can deliver a message before returning an error, so an
