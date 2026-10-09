@@ -225,6 +225,8 @@ class PipefacilAdapter(BasePlatformAdapter):
         self.profile_home = Path(get_hermes_home()).resolve()
         from .admission import ProfileAdmissionControl
         self._admission_control = ProfileAdmissionControl(self.profile_home, extra.get("managed_admission", False))
+        from .publication import read_publication
+        self._managed_publication = read_publication(self.profile_home) if self._admission_control.enabled else None
         self.media_base_url = get_scoped_secret("PIPEFACIL_MEDIA_BASE_URL", "") or extra.get("media_base_url", "")
         self.extensions = Extensions(self.profile_home, extra.get("extension_plugins", []))
         self._app = None
@@ -768,6 +770,15 @@ class PipefacilAdapter(BasePlatformAdapter):
         control = getattr(self, "_admission_control", None)
         return control.status() if control is not None else {"managed": False, "closed": False}
 
+    def install_managed_publication(self, expected_version):
+        """Read the verified marker under the private, drained profile barrier."""
+        from .publication import read_publication
+        with self._admission_control.configuration_scope(expected_version):
+            self._managed_publication = read_publication(self.profile_home)
+            if self._managed_publication is None:
+                raise ValueError("Publication marker required")
+            return dict(self._managed_publication)
+
     def retire_managed_profile(self, expected_version):
         """Close this drained adapter before native profile unserving; keep durable history."""
         with self._admission_control.configuration_scope(expected_version):
@@ -1234,6 +1245,9 @@ class PipefacilAdapter(BasePlatformAdapter):
         secondary = getattr(self, "_hermes_profile_name", None)
         if secondary:
             source.profile = secondary
+        publication = getattr(self, "_managed_publication", None)
+        if publication:
+            source.thread_id = "pf-revision-" + str(publication["revision"])
         return source
 
     @staticmethod
