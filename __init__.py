@@ -1,6 +1,6 @@
 """Native Hermes plugin entry point."""
 
-__version__ = "0.5.2"
+__version__ = "0.5.2-dev"
 
 
 def register(ctx) -> None:

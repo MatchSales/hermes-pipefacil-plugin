@@ -223,6 +223,8 @@ class PipefacilAdapter(BasePlatformAdapter):
         self.reset_allowed_users.discard("")
         from hermes_constants import get_hermes_home
         self.profile_home = Path(get_hermes_home()).resolve()
+        from .admission import ProfileAdmissionControl
+        self._admission_control = ProfileAdmissionControl(self.profile_home, extra.get("managed_admission", False))
         self.media_base_url = get_scoped_secret("PIPEFACIL_MEDIA_BASE_URL", "") or extra.get("media_base_url", "")
         self.extensions = Extensions(self.profile_home, extra.get("extension_plugins", []))
         self._app = None
@@ -639,6 +641,10 @@ class PipefacilAdapter(BasePlatformAdapter):
                 return web.json_response({"error": "invalid_request_body"}, status=400)
             if not isinstance(payload, dict) or payload.get("type") != "message.received":
                 return web.json_response({"status": "ignored", "reason": "unsupported event"}, status=200)
+            control = getattr(self, "_admission_control", None)
+            if control is not None and control.status()["closed"]:
+                return web.json_response({"error": "profile_admission_closed"}, status=503,
+                                         headers={"Retry-After": "5"})
             data = payload.get("data")
             if not isinstance(data, dict):
                 return web.json_response({"error": "missing event data"}, status=422)
@@ -704,8 +710,19 @@ class PipefacilAdapter(BasePlatformAdapter):
         task.add_done_callback(self._inbound_task_finished)
 
     async def _drain(self, chat):
+        control = getattr(self, "_admission_control", None)
+        if control is not None and not control.enter():
+            self._workers.pop(chat, None)
+            return
         try:
-            while not self._closing and not self._ready_error:
+            await self._drain_open(chat)
+        finally:
+            if control is not None:
+                control.leave()
+
+    async def _drain_open(self, chat):
+        try:
+            while not self._closing and not self._ready_error and not self.management_status()["closed"]:
                 async with self._slots:
                     pending = await asyncio.to_thread(self.state.next, chat)
                     if pending is None:
@@ -741,11 +758,28 @@ class PipefacilAdapter(BasePlatformAdapter):
             self._workers.pop(chat, None)
             # A request may have committed after next() saw an empty queue, but
             # before this worker removed itself. Recheck after removing ownership.
-            if not self._closing and not self._ready_error:
+            if not self._closing and not self._ready_error and not self.management_status()["closed"]:
                 with self.state.db() as db:
                     queued = db.execute("SELECT 1 FROM jobs WHERE chat=? AND state='queued' LIMIT 1", (chat,)).fetchone()
                 if queued:
                     self._schedule(chat)
+
+    def management_status(self):
+        control = getattr(self, "_admission_control", None)
+        return control.status() if control is not None else {"managed": False, "closed": False}
+
+    def set_admission(self, closed, expected_version):
+        """Trusted in-process admin capability; never registered as an agent tool."""
+        control = getattr(self, "_admission_control", None)
+        if control is None:
+            raise ValueError("Profile is not managed")
+        status = control.set_closed(closed, expected_version)
+        if not closed:
+            with self.state.db() as db:
+                chats = [row[0] for row in db.execute("SELECT DISTINCT chat FROM jobs WHERE state='queued'")]
+            for chat in chats:
+                self._schedule(chat)
+        return status
 
     def _inbound_task_finished(self, task: asyncio.Task) -> None:
         self._inbound_tasks.discard(task)
