@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+## 0.5.2
+
+- Suppress terminal Hermes failed-turn responses even during a live customer reply. Keep the entire provider diagnostic and retry guidance private, including failures after preliminary tool effects. Preserve a failed inbox/extension completion outcome without resending or clearing conversation state.
 - Keep delivery failures out of customer chats, including errors during an active reply. Disable the gateway's generic resend, formatting banner and exhausted-retry notice; preserve the failed result, internal logs, effect journal and native delivery metrics where supported.
 - Disable channel warning presentation independently of profile settings. Uncertain WhatsApp delivery remains an operator reconciliation task.
 
