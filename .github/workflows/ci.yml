@@ -9,6 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
         source: [official, current]
     steps:
@@ -31,14 +32,20 @@ jobs:
               cp -a /plugin /tmp/plugin
               uv pip install --python /opt/hermes/.venv/bin/python -r /tmp/plugin/requirements-test.txt
               HERMES_SOURCE=/opt/hermes
+              TEST_PYTHON=/opt/hermes/.venv/bin/python
               if [ "$TEST_SOURCE" = current ]; then
                 git clone --depth=1 https://github.com/NousResearch/hermes-agent.git /tmp/hermes-current
                 git -C /tmp/hermes-current rev-parse HEAD
                 HERMES_SOURCE=/tmp/hermes-current
+                # Current Hermes supports Python 3.14; the pinned image uses 3.13.
+                uv venv --python 3.14 /tmp/hermes-current-tests
+                TEST_PYTHON=/tmp/hermes-current-tests/bin/python
+                uv pip install --python "$TEST_PYTHON" -e "$HERMES_SOURCE" \
+                  -r /tmp/plugin/requirements-test.txt aiohttp
               fi
               export HERMES_SOURCE PYTHONPATH="$HERMES_SOURCE:/tmp/plugin/tests"
-              /opt/hermes/.venv/bin/python -c "import gateway.platforms.base; print(gateway.platforms.base.__file__)"
-              /opt/hermes/.venv/bin/python -m pytest --import-mode=importlib /tmp/plugin/tests -q'
+              "$TEST_PYTHON" -c "import gateway.platforms.base; print(gateway.platforms.base.__file__)"
+              "$TEST_PYTHON" -m pytest --import-mode=importlib /tmp/plugin/tests -q'
   media-gateway:
     runs-on: ubuntu-latest
     steps:
