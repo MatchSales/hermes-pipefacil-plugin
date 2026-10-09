@@ -44,3 +44,27 @@ def test_publication_preserves_history_and_other_profile(multiplex):
     publication = __import__(m.module.__package__ + ".publication", fromlist=["read_publication"])
     assert publication.read_publication(adapter.profile_home) == marker
     assert publication.read_publication(m.homes["sdr-b"]) is None
+
+
+def test_commercial_skill_reading_is_limited_to_published_markdown(multiplex):
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override
+    m = multiplex
+    home = m.homes["sdr-a"]
+    path = home / "skills/pipefacil-commercial/vendas/SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("Approved commercial skill")
+    secret = home / ".env"
+    adapter = m.adapters["sdr-a"]
+    adapter._managed_publication = {"skills": ["vendas"]}
+    token = set_hermes_home_override(str(home))
+    try:
+        with m.turn("sdr-a"):
+            result = m.tools._read_profile_file({"path": str(path.relative_to(home))}, session_id=m.entries["sdr-a"].session_id)
+            assert "Approved commercial skill" in result
+            assert "not allowed" in m.tools._read_profile_file({"path": str(secret)}, session_id=m.entries["sdr-a"].session_id)
+            path.unlink()
+            path.symlink_to(secret)
+            assert "not allowed" in m.tools._read_profile_file({"path": str(path)}, session_id=m.entries["sdr-a"].session_id)
+        assert "skills/pipefacil-commercial/vendas/SKILL.md" in adapter._managed_channel_prompt()
+    finally:
+        reset_hermes_home_override(token)

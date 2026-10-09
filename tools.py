@@ -211,7 +211,10 @@ def _read_profile_file(
                 if len(entries) == 200:
                     break
             return tool_result({"path": str(resolved.relative_to(profile_home)), "entries": entries, "limit": 200})
+        from .publication import skill_paths
+        commercial = {profile_home / path for path in skill_paths(getattr(adapter, "_managed_publication", None))}
         approved = (
+            (candidate == resolved and resolved in commercial) or
             resolved.is_relative_to(knowledge_root)
             or str(resolved) in context["media_paths"]
         )

@@ -1088,7 +1088,7 @@ class PipefacilAdapter(BasePlatformAdapter):
         )
         event = _new_message_event(
             text=prompt,
-            channel_prompt=PIPEFACIL_CHANNEL_PROMPT,
+            channel_prompt=self._managed_channel_prompt(),
             message_type=(
                 MessageType.VOICE if any(mime.startswith("audio/") for mime in media_types)
                 else MessageType.PHOTO if any(mime.startswith("image/") for mime in media_types)
@@ -1231,6 +1231,10 @@ class PipefacilAdapter(BasePlatformAdapter):
         if accepted and final == normalize(" ".join(message["text"] for message in accepted)):
             return accepted[-1]
         return None
+
+    def _managed_channel_prompt(self):
+        from .publication import skill_prompt
+        return PIPEFACIL_CHANNEL_PROMPT + skill_prompt(getattr(self, "_managed_publication", None))
 
     def _build_contact_source(self, *, chat_id: str, contact: dict[str, Any], message_id: str | None):
         phone = str(contact.get("phone") or "")
