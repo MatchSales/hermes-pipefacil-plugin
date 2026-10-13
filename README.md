@@ -200,6 +200,22 @@ media reference rather than the source URL.
 
 ## Configure the webhook
 
+External profiles support both existing signed webhooks and the CRM's execution-v2 envelope.
+When an authenticated event contains `execution`, the adapter uses the execution-scoped API
+for context, history and effects. It never falls back to generic CRM routes for an invalid or
+obsolete execution. The destination is the original channel/conversation; handoff pauses AI
+and preserves human owners. No administrative plugin or `managed_admission` setting is needed.
+
+Health advertises `webhookExecutionProtocols: [1, 2]`. Before converting a workspace to the
+new AI-agent assignment, install a revision with this capability, test its actual profile,
+and explicitly mark that external integration as `assignmentProtocolVersion: 2` in the CRM.
+Keep existing HMAC secrets, API keys, profile contents and webhook addresses. Integrations
+using other consumers must implement v2 before conversion; the backend blocks incompatible
+consumers instead of silently changing their authorization. Business extensions that call
+generic CRM endpoints directly also require review; compatibility of the shared tools does
+not certify an extension's private outbox or custom API calls. See
+[the external execution contract](docs/external-execution-v2.md).
+
 For a standalone profile gateway, configure Pipefacil with:
 
 ```text

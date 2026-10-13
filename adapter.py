@@ -610,7 +610,8 @@ class PipefacilAdapter(BasePlatformAdapter):
         from aiohttp import web
         contract = {"pluginVersion": __version__, "guidanceRevision": SHARED_GUIDANCE_REVISION,
                     "leadAdmissionRevision": LEAD_GATE_REVISION, "mediaPersistenceRevision": 2, "extensionApiRevision": API_REVISION,
-                    "capabilities": {"text": True, "crmTools": True, "inboundMedia": True, "outboundMedia": True}}
+                    "capabilities": {"text": True, "crmTools": True, "inboundMedia": True, "outboundMedia": True},
+                    "webhookExecutionProtocols": [1, 2]}
         try:
             extensions = getattr(self, "extensions", None)
             contract["extensions"] = extensions.metadata() if extensions is not None else []
@@ -648,7 +649,7 @@ class PipefacilAdapter(BasePlatformAdapter):
                 return web.json_response({"error": str(exc)}, status=exc.status)
             except OSError:
                 return web.json_response({"error": "invalid_request_body"}, status=400)
-            if isinstance(payload, dict) and "_pipefacil_managed" in payload:
+            if isinstance(payload, dict) and any(k in payload for k in ("_pipefacil_managed", "_pipefacil_external_execution")):
                 return web.json_response({"error": "private_context_not_allowed"}, status=400)
             if not isinstance(payload, dict) or payload.get("type") != "message.received":
                 return web.json_response({"status": "ignored", "reason": "unsupported event"}, status=200)
@@ -656,6 +657,9 @@ class PipefacilAdapter(BasePlatformAdapter):
             if control is not None and control.status()["closed"]:
                 return web.json_response({"error": "profile_admission_closed"}, status=503,
                                          headers={"Retry-After": "5"})
+            if "execution" in payload:
+                from .external import accept_webhook
+                return await accept_webhook(self, payload)
             data = payload.get("data")
             if not isinstance(data, dict):
                 return web.json_response({"error": "missing event data"}, status=422)
@@ -1266,7 +1270,14 @@ class PipefacilAdapter(BasePlatformAdapter):
 
     def _managed_channel_prompt(self):
         from .publication import skill_prompt
-        return PIPEFACIL_CHANNEL_PROMPT + skill_prompt(getattr(self, "_managed_publication", None))
+        from .managed import current
+        execution_guidance = """
+Este turno usa o vínculo Agente de IA do PipeFácil. A autorização é pela execução atual,
+independente dos responsáveis humanos. Neste modo, pipefacil_handoff pausa a IA do negócio
+e mantém responsável e co-responsável. Não prometa troca de responsável ou disponibilidade
+humana. Depois do handoff, encerre o turno sem novas mensagens ou ações.
+""" if current() else ""
+        return PIPEFACIL_CHANNEL_PROMPT + execution_guidance + skill_prompt(getattr(self, "_managed_publication", None))
 
     def _build_contact_source(self, *, chat_id: str, contact: dict[str, Any], message_id: str | None):
         phone = str(contact.get("phone") or "")

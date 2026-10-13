@@ -37,28 +37,44 @@ def validate(adapter, command):
     if command["revision"] != publication.get("revision"):
         raise ValueError("stale_revision")
     payload = command["payload"]
+    execution, data = validate_payload(adapter, payload, max_age=600)
+    if execution["agentId"] != command["agentId"]:
+        raise ValueError("invalid_execution")
+    return identity, execution, data
+
+
+def validate_payload(adapter, payload, *, max_age, allow_team_messages=False):
+    """Validate the same CRM execution envelope for private and HMAC ingress."""
     execution = payload.get("execution", {}) if isinstance(payload, dict) else {}
-    if (execution.get("protocolVersion") != 2 or execution.get("agentId") != command["agentId"]
+    if (not isinstance(execution, dict) or execution.get("protocolVersion") != 2
             or any(not _identifier(execution.get(k)) for k in ("executionId", "agentId", "dealId", "channelId", "conversationId"))
             or type(execution.get("generation")) is not int or type(execution.get("agentVersion")) is not int
+            or execution["generation"] < 0 or execution["agentVersion"] < 0
             or payload.get("type") != "message.received"):
         raise ValueError("invalid_execution")
     data = payload.get("data", {})
+    if not isinstance(data, dict):
+        raise ValueError("invalid_destination")
     channel, contact, deal = data.get("channel", {}), data.get("contact", {}), data.get("deal", {})
-    if (channel.get("id") != execution["channelId"] or deal.get("id") != execution["dealId"]
+    if (not all(isinstance(v, dict) for v in (channel, contact, deal))
+            or channel.get("id") != execution["channelId"] or deal.get("id") != execution["dealId"]
             or type(deal.get("seq")) is not int or deal["seq"] < 1
             or not _identifier(contact.get("id")) or not re.fullmatch(r"[+0-9]{5,30}", str(contact.get("phone", "")))):
         raise ValueError("invalid_destination")
     messages = data.get("messages")
     if (not isinstance(messages, list) or not 1 <= len(messages) <= 100
-            or any(not isinstance(m, dict) or not _identifier(m.get("id")) or m.get("fromMe") is not False for m in messages)):
+            or any(not isinstance(m, dict) or not _identifier(m.get("id"))
+                   or type(m.get("fromMe")) is not bool
+                   or m["fromMe"] and not allow_team_messages for m in messages)
+            or not any(m["fromMe"] is False for m in messages)):
         raise ValueError("invalid_messages")
     expires = message_epoch(execution.get("expiresAt"))
-    if expires is None or expires <= time.time() or len(fresh_messages(messages, now=time.time(), max_age=600)) != len(messages):
+    now = time.time()
+    if expires is None or expires <= now or len(fresh_messages(messages, now=now, max_age=max_age)) != len(messages):
         raise ValueError("expired_execution")
     if adapter.channel_ids and execution["channelId"] not in adapter.channel_ids:
         raise ValueError("channel_not_allowed")
-    return identity, execution, data
+    return execution, data
 
 
 async def accept(adapter, command):
@@ -84,14 +100,18 @@ async def accept(adapter, command):
 
 @asynccontextmanager
 async def turn_scope(adapter, kwargs):
-    value = kwargs["payload"].get("_pipefacil_managed") if adapter.management_status()["managed"] else None
+    payload = kwargs["payload"]
+    value = (payload.get("_pipefacil_managed") if adapter.management_status()["managed"]
+             else payload.get("_pipefacil_external_execution"))
     if value is None:
         yield
         return
     locks = getattr(adapter, "_managed_deal_locks", None)
     if locks is None:
         locks = adapter._managed_deal_locks = WeakValueDictionary()
-    key = (value["workspaceId"], value["execution"]["dealId"])
+    # Public webhooks do not provide a tenant id. The backend resolves it from the
+    # profile's API key; local serialization uses the profile's own namespace.
+    key = (value.get("workspaceId", str(adapter.profile_home)), value["execution"]["dealId"])
     lock = locks.setdefault(key, asyncio.Lock())
     async with lock:
         token = CURRENT.set(value)

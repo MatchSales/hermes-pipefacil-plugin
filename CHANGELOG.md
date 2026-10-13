@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.8.1-dev
+
+- Accept HMAC-authenticated execution-v2 webhooks for external profiles without enabling profile management. Use the execution-scoped CRM API for history, replies, edits and terminal handoff; preserve protocol-v1 webhooks in legacy workspaces.
+- Persist external execution IDs and content fingerprints, cap queue expiry by the original execution deadline, and serialize turns for the same deal across channels. Reject malformed/private context and suppress sends after pause, reassignment or key revocation.
+- Advertise `webhookExecutionProtocols: [1, 2]` in health. Workspace conversion still requires validated v2 consumers; business extensions making direct generic CRM calls must be adapted separately.
+
 ## 0.5.2
 
 - Suppress terminal Hermes failed-turn responses even during a live customer reply. Keep the entire provider diagnostic and retry guidance private, including failures after preliminary tool effects. Preserve a failed inbox/extension completion outcome without resending or clearing conversation state.

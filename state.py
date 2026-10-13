@@ -65,6 +65,8 @@ class State:
             db.execute("CREATE TABLE IF NOT EXISTS executions(id TEXT PRIMARY KEY, workspace TEXT NOT NULL, "
                        "agent TEXT NOT NULL, revision INTEGER NOT NULL, fingerprint TEXT NOT NULL, "
                        "job INTEGER NOT NULL UNIQUE, reported INTEGER NOT NULL DEFAULT 0)")
+            db.execute("CREATE TABLE IF NOT EXISTS external_executions(id TEXT PRIMARY KEY, "
+                       "fingerprint TEXT NOT NULL, job INTEGER NOT NULL UNIQUE)")
             db.execute("CREATE TABLE IF NOT EXISTS uploads(key TEXT PRIMARY KEY, receipt TEXT NOT NULL, updated REAL NOT NULL)")
 
     @contextmanager
@@ -120,6 +122,7 @@ class State:
             db.execute("DELETE FROM receipts WHERE admitted_at<?", (cutoff,))
             db.execute("DELETE FROM uploads WHERE updated<?", (cutoff,))
             db.execute("DELETE FROM executions WHERE job NOT IN (SELECT id FROM jobs)")
+            db.execute("DELETE FROM external_executions WHERE job NOT IN (SELECT id FROM jobs)")
             db.execute("DELETE FROM actions WHERE state NOT IN ('pending','uncertain') AND updated<?", (cutoff,))
             db.execute("DELETE FROM jobs WHERE state NOT IN ('queued','processing') AND updated<? AND id NOT IN (SELECT job FROM actions)", (cutoff,))
             # Unresolved effects keep their audit references, without retaining the
@@ -130,14 +133,16 @@ class State:
         chat = kwargs["chat_id"]
         with self.db() as db:
             managed = kwargs["payload"].get("_pipefacil_managed")
-            execution_id = managed["execution"]["executionId"] if managed else None
-            execution_fingerprint = self.execution_fingerprint(kwargs["payload"]) if managed else None
+            execution = managed or kwargs["payload"].get("_pipefacil_external_execution")
+            execution_id = execution["execution"]["executionId"] if execution else None
+            execution_fingerprint = self.execution_fingerprint(kwargs["payload"]) if execution else None
             if execution_id:
-                prior = db.execute("SELECT fingerprint,job FROM executions WHERE id=?", (execution_id,)).fetchone()
+                table = "executions" if managed else "external_executions"
+                prior = db.execute("SELECT fingerprint,job FROM " + table + " WHERE id=?", (execution_id,)).fetchone()
                 if prior:
                     if prior["fingerprint"] != execution_fingerprint:
                         raise Conflict("execution_id_reused")
-                    return prior["job"]
+                    return prior["job"] if managed else None
             accepted = []
             for message in kwargs["messages"]:
                 identity = message.get("id") or message.get("externalId")
@@ -164,15 +169,18 @@ class State:
                 raise Full("inbound_queue_full")  # Entire transaction, including receipts, rolls back.
             kwargs = {**kwargs, "messages": accepted}
             expires = min(message_epoch(m.get("timestamp")) + max_age for m in accepted)
-            if managed:
-                expires = min(expires, message_epoch(managed["execution"]["expiresAt"]))
+            if execution:
+                expires = min(expires, message_epoch(execution["execution"]["expiresAt"]))
             cursor = db.execute("INSERT INTO jobs(chat,payload,state,admitted,expires,updated) VALUES (?,?,'queued',?,?,?)",
                                 (chat, canonical(kwargs), now, expires, now))
             job_id = cursor.lastrowid
-            if execution_id:
+            if managed:
                 db.execute("INSERT INTO executions(id,workspace,agent,revision,fingerprint,job) VALUES (?,?,?,?,?,?)",
                            (execution_id, managed["workspaceId"], managed["agentId"], managed["revision"],
                             execution_fingerprint, job_id))
+            elif execution_id:
+                db.execute("INSERT INTO external_executions(id,fingerprint,job) VALUES (?,?,?)",
+                           (execution_id, execution_fingerprint, job_id))
             return job_id
 
     @staticmethod

@@ -144,6 +144,18 @@ e por um hook em tempo de execução, mesmo que outros toolsets estejam habilita
 
 ### Proteção contra reenvios
 
+Profiles externos também reconhecem o envelope `execution` v2 nos webhooks assinados.
+Nesse caso, histórico e ações usam a API da execução; o handoff pausa a IA e preserva os
+responsáveis humanos. Não é necessário instalar o plugin administrativo ou habilitar
+`managed_admission`. Webhooks antigos continuam no contrato anterior em workspaces legados.
+
+O health anuncia `webhookExecutionProtocols: [1, 2]`. Antes de converter o workspace para
+o campo Agente de IA, instale uma revisão com essa capacidade, valide o profile e marque
+`assignmentProtocolVersion: 2` no CRM. Preserve chave, segredo, conteúdo e endereço do webhook.
+Consumidores próprios e extensões com chamadas diretas à API genérica precisam adotar o
+contrato v2; a compatibilidade das ferramentas comuns não certifica esses códigos particulares.
+Veja o [contrato de execução externa](docs/external-execution-v2.md).
+
 Cada mensagem precisa de `timestamp` original com fuso horário, ou horário Unix numérico em segundos
 ou milissegundos. Por padrão, mensagens com mais de cinco minutos, sem horário válido ou mais de
 30 segundos no futuro são ignoradas com HTTP 200. O horário novo do envio do webhook não transforma
