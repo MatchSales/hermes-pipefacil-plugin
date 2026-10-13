@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from test_gateway_sessions import multiplex  # noqa: F401
+from test_gateway_sessions import multiplex as multiplex
 
 
 def test_publication_preserves_history_and_other_profile(multiplex):
