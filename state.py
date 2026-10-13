@@ -62,6 +62,9 @@ class State:
             db.execute("CREATE TABLE IF NOT EXISTS actions(key TEXT PRIMARY KEY, job INTEGER NOT NULL, kind TEXT NOT NULL, "
                        "state TEXT NOT NULL, result TEXT, updated REAL NOT NULL)")
             db.execute("CREATE INDEX IF NOT EXISTS actions_job_kind_state ON actions(job,kind,state)")
+            db.execute("CREATE TABLE IF NOT EXISTS executions(id TEXT PRIMARY KEY, workspace TEXT NOT NULL, "
+                       "agent TEXT NOT NULL, revision INTEGER NOT NULL, fingerprint TEXT NOT NULL, "
+                       "job INTEGER NOT NULL UNIQUE, reported INTEGER NOT NULL DEFAULT 0)")
             db.execute("CREATE TABLE IF NOT EXISTS uploads(key TEXT PRIMARY KEY, receipt TEXT NOT NULL, updated REAL NOT NULL)")
 
     @contextmanager
@@ -116,6 +119,7 @@ class State:
         with self.db() as db:
             db.execute("DELETE FROM receipts WHERE admitted_at<?", (cutoff,))
             db.execute("DELETE FROM uploads WHERE updated<?", (cutoff,))
+            db.execute("DELETE FROM executions WHERE job NOT IN (SELECT id FROM jobs)")
             db.execute("DELETE FROM actions WHERE state NOT IN ('pending','uncertain') AND updated<?", (cutoff,))
             db.execute("DELETE FROM jobs WHERE state NOT IN ('queued','processing') AND updated<? AND id NOT IN (SELECT job FROM actions)", (cutoff,))
             # Unresolved effects keep their audit references, without retaining the
@@ -125,6 +129,15 @@ class State:
     def admit(self, kwargs, *, now, max_age):
         chat = kwargs["chat_id"]
         with self.db() as db:
+            managed = kwargs["payload"].get("_pipefacil_managed")
+            execution_id = managed["execution"]["executionId"] if managed else None
+            execution_fingerprint = self.execution_fingerprint(kwargs["payload"]) if managed else None
+            if execution_id:
+                prior = db.execute("SELECT fingerprint,job FROM executions WHERE id=?", (execution_id,)).fetchone()
+                if prior:
+                    if prior["fingerprint"] != execution_fingerprint:
+                        raise Conflict("execution_id_reused")
+                    return prior["job"]
             accepted = []
             for message in kwargs["messages"]:
                 identity = message.get("id") or message.get("externalId")
@@ -142,6 +155,8 @@ class State:
                 db.execute("INSERT INTO receipts VALUES (?,?,?)", (key, now, fingerprint))
                 accepted.append(message)
             if not accepted:
+                if execution_id:
+                    raise Conflict("messages_already_admitted")
                 return None
             total = db.execute("SELECT count(*) FROM jobs WHERE state IN ('queued','processing')").fetchone()[0]
             count = db.execute("SELECT count(*) FROM jobs WHERE state IN ('queued','processing') AND chat=?", (chat,)).fetchone()[0]
@@ -149,9 +164,55 @@ class State:
                 raise Full("inbound_queue_full")  # Entire transaction, including receipts, rolls back.
             kwargs = {**kwargs, "messages": accepted}
             expires = min(message_epoch(m.get("timestamp")) + max_age for m in accepted)
+            if managed:
+                expires = min(expires, message_epoch(managed["execution"]["expiresAt"]))
             cursor = db.execute("INSERT INTO jobs(chat,payload,state,admitted,expires,updated) VALUES (?,?,'queued',?,?,?)",
                                 (chat, canonical(kwargs), now, expires, now))
-            return cursor.lastrowid
+            job_id = cursor.lastrowid
+            if execution_id:
+                db.execute("INSERT INTO executions(id,workspace,agent,revision,fingerprint,job) VALUES (?,?,?,?,?,?)",
+                           (execution_id, managed["workspaceId"], managed["agentId"], managed["revision"],
+                            execution_fingerprint, job_id))
+            return job_id
+
+    @staticmethod
+    def execution_fingerprint(payload):
+        import copy
+        value = copy.deepcopy(payload)
+        for message in value.get("data", {}).get("messages", []):
+            if isinstance(message.get("media"), dict):
+                message["media"].pop("downloadUrl", None)
+        return digest(value)
+
+    def verify_execution(self, execution_id, command):
+        payload = {**command["payload"], "_pipefacil_managed": {
+            **{k: command[k] for k in ("workspaceId", "agentId", "profile", "generation", "revision")},
+            "execution": command["payload"]["execution"]}}
+        with self.db() as db:
+            row = db.execute("SELECT fingerprint FROM executions WHERE id=?", (execution_id,)).fetchone()
+            if row is None or row[0] != self.execution_fingerprint(payload):
+                raise Conflict("execution_id_reused")
+
+    def execution_receipt(self, execution_id):
+        with self.db() as db:
+            row = db.execute("SELECT e.*,j.state,j.admitted,j.updated FROM executions e JOIN jobs j ON j.id=e.job WHERE e.id=?",
+                             (execution_id,)).fetchone()
+            if row is None:
+                return None
+            state = {"queued": "ACCEPTED", "processing": "PROCESSING", "completed": "COMPLETED",
+                     "failed": "FAILED", "interrupted": "INTERRUPTED", "expired": "EXPIRED"}[row["state"]]
+            return {"executionId": row["id"], "workspaceId": row["workspace"], "agentId": row["agent"],
+                    "revision": row["revision"], "state": state, "inputTokens": None, "outputTokens": None,
+                    "durationMs": None if state in {"ACCEPTED", "PROCESSING"} else max(0, int((row["updated"] - row["admitted"]) * 1000))}
+
+    def execution_reported(self, execution_id):
+        with self.db() as db:
+            db.execute("UPDATE executions SET reported=1 WHERE id=?", (execution_id,))
+
+    def pending_execution_reports(self):
+        with self.db() as db:
+            return [r[0] for r in db.execute("SELECT e.id FROM executions e JOIN jobs j ON j.id=e.job "
+                    "WHERE e.reported=0 AND j.state NOT IN ('queued','processing') LIMIT 500")]
 
     def next(self, chat):
         now = time.time()

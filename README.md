@@ -407,3 +407,20 @@ is no fallback to expiring links; text delivery remains available. Ambiguous eff
 retain the existing journal/reconciliation rules. Extension API revision 1 and stored
 audio remain compatible. This fixes new sends after the shared plugin is installed
 and configured on each profile; it does not rewrite or resend historical messages.
+
+## Hermes gerenciado — prova local da Sprint 1
+
+A versão `0.5.2-dev` acrescenta uma barreira de admissão opt-in por profile, usada pelo
+complemento `pipefacil-admin` experimental. Profiles existentes continuam com o comportamento
+anterior: `extra.managed_admission` é `false` por padrão.
+
+Quando explicitamente habilitada em um profile descartável, a barreira nasce fechada, recusa
+novas entregas com 503 e mantém os jobs já aceitos na fila. O administrador fecha a admissão,
+espera `drained=true` e usa a versão esperada antes de modificar configuração. Reabrir agenda a
+fila preservada. O arquivo privado `.pipefacil-admission.json` persiste estado/versão; corrupção
+impede inicialização. Um único processo deve ser dono do runtime de cada profile nesta prova.
+
+Esta entrega não provisiona agentes, não publica revisões e não deve ser instalada no Hermes
+compartilhado. Recibos administrativos, coordenação completa de publicação e restrições de
+ferramentas serão implementados nas Sprints 3/4 do plano PipeFácil. Testes novos em
+`tests/test_admission.py`; prova com dois profiles no repositório administrativo.

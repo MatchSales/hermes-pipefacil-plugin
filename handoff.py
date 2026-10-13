@@ -43,6 +43,28 @@ async def execute(adapter, chat_id, context, key, args, active):
     if message is not None and (not isinstance(message, str) or not message.strip()
                                 or len(message) > 4000 or "\x00" in message):
         raise ValueError("Closing message must contain 1–4000 characters.")
+    from . import managed
+    if managed.current():
+        if not active():
+            raise PipefacilAPIError("The Pipefacil turn is no longer active.")
+        arguments = {"executionId": managed.current()["execution"]["executionId"], "properties": properties, "message": message}
+        previous = adapter.state.handoff(context["job_id"])
+        if previous:
+            if previous["state"] == "accepted" and previous["key"] == digest([context["job_id"], "handoff", arguments]):
+                return previous["result"]
+            raise PipefacilAPIError("Handoff already attempted; consult its receipt.")
+        if properties:
+            await asyncio.to_thread(adapter.crm.update, context, key, properties, active)
+        await asyncio.to_thread(adapter.crm.authorized, context, key, writing=True)
+        if message is not None:
+            outbound = {"type": "text", "text": message}
+            receipt = await adapter.send_api_message(chat_id, outbound)
+            adapter.record_preliminary_delivery(chat_id, outbound, receipt)
+        adapter.state.assert_handoff_ready(context["job_id"])
+        def pause():
+            result = managed.effect(api_key=key, base_url=adapter.api_base_url, method="POST", suffix="/handoff")
+            return {"success": True, "handed_off": True, "terminal": True, "paused": True, "receipt": result["data"]}
+        return await asyncio.to_thread(adapter.effect, context["job_id"], "handoff", arguments, pause, active=active)
     arguments = {"seq": context["deal_seq"], "contact": context["contact"],
                  "responsibleUserId": adapter.crm.handoff_user_id, "properties": properties, "message": message}
     if not active():

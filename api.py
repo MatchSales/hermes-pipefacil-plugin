@@ -74,6 +74,7 @@ def request_json(
     params: dict[str, Any] | None = None,
     payload: dict[str, Any] | None = None,
     files: dict[str, Any] | None = None,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     if not api_key.strip():
         raise PipefacilAPIError("PIPEFACIL_API_KEY is not configured for this profile.")
@@ -82,8 +83,10 @@ def request_json(
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {api_key.strip()}",
-        "User-Agent": "hermes-pipefacil-plugin/0.5.1",
+        "User-Agent": "hermes-pipefacil-plugin/0.8.0-dev",
     }
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key
     try:
         with httpx.Client(timeout=API_TIMEOUT_SECONDS, follow_redirects=False, trust_env=False) as client:
             with client.stream(method, url, headers=headers, json=payload, files=files) as response:
@@ -109,6 +112,14 @@ def fetch_conversation_history(
     channel_id: str | None,
     limit: int = 100,
 ) -> tuple[list[dict[str, Any]], bool]:
+    from . import managed
+    if managed.current():
+        execution_id = managed.current()["execution"]["executionId"]
+        items = request_json(api_key=api_key, base_url=base_url, method="GET",
+                path="/api/v1/ai-agent/executions/" + quote(execution_id, safe="") + "/messages")["data"]
+        if not isinstance(items, list):
+            raise PipefacilAPIError("Invalid execution history.")
+        return list(reversed(items)), False
     if not conversation_key.strip():
         raise PipefacilAPIError("A contact phone or conversation id is required to load history.")
     limit = max(1, min(int(limit), 200))
@@ -186,6 +197,16 @@ def send_message(
         body["channelId"] = channel_id
     elif sender_phone_number_id:
         body["senderPhoneNumberId"] = sender_phone_number_id
+    from . import managed
+    if managed.current():
+        body.pop("to", None)
+        body.pop("channelId", None)
+        body.pop("senderPhoneNumberId", None)
+        if "text" in body:
+            body["body"] = body.pop("text")
+        if "mediaLink" in body:
+            body["mediaUrl"] = body.pop("mediaLink")
+        return managed.effect(api_key=api_key, base_url=base_url, method="POST", suffix="/messages", payload=body)
     return request_json(
         api_key=api_key,
         base_url=base_url,
@@ -198,6 +219,9 @@ def send_message(
 def update_deal(
     *, api_key: str, base_url: str, seq: int, properties: dict[str, Any]
 ) -> dict[str, Any]:
+    from . import managed
+    if managed.current():
+        return managed.effect(api_key=api_key, base_url=base_url, method="PATCH", suffix="/deal", payload=properties)
     return request_json(
         api_key=api_key,
         base_url=base_url,
@@ -208,6 +232,12 @@ def update_deal(
 
 
 def get_deal(*, api_key, base_url, seq):
+    from . import managed
+    if managed.current():
+        data = managed.context(api_key=api_key, base_url=base_url).get("deal")
+        if not isinstance(data, dict) or data.get("seq") != seq:
+            raise PipefacilAPIError("Deal differs from the managed execution.")
+        return data
     data = request_json(api_key=api_key, base_url=base_url, method="GET", path=f"/api/v1/deals/{int(seq)}")["data"]
     if not isinstance(data, dict) or data.get("seq") != seq:
         raise PipefacilAPIError("Pipefacil returned an invalid deal response.")
@@ -215,6 +245,12 @@ def get_deal(*, api_key, base_url, seq):
 
 
 def get_contact(*, api_key, base_url, contact_id):
+    from . import managed
+    if managed.current():
+        data = managed.context(api_key=api_key, base_url=base_url).get("deal", {}).get("contact", {})
+        if data.get("id") != contact_id:
+            raise PipefacilAPIError("Contact differs from the managed execution.")
+        return data
     data = request_json(api_key=api_key, base_url=base_url, method="GET",
                         path=f"/api/v1/contacts/{quote(contact_id, safe='')}")["data"]
     if not isinstance(data, dict) or data.get("id") != contact_id:
@@ -223,6 +259,9 @@ def get_contact(*, api_key, base_url, contact_id):
 
 
 def get_pipelines(*, api_key, base_url):
+    from . import managed
+    if managed.current():
+        return managed.context(api_key=api_key, base_url=base_url).get("pipelines", [])
     data = request_json(api_key=api_key, base_url=base_url, method="GET", path="/api/v1/pipelines")["data"]
     if not isinstance(data, list) or not all(isinstance(p, dict) for p in data):
         raise PipefacilAPIError("Pipefacil returned invalid pipelines.")
