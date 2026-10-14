@@ -118,8 +118,8 @@ def test_two_whatsapps_same_deal_original_destinations_receipts_and_pause(tmp_pa
             if not paused:
                 assert sent[0][1] == "whatsapp-a" and sent[1][1] == "whatsapp-b"
                 assert ended.index("one") < started.index("two") + 1
-                assert len(set(sessions)) == 2
-                assert all(revision == "pf-revision-1" for _, revision in sessions)
+                assert len(set(sessions)) == 3
+                assert all(revision.startswith("pf-revision-1-execution-") for _, revision in sessions)
                 assert all(report["state"] == "COMPLETED" for _, report in reports)
             assert len(reports) == 3
             prior = value.managed_execution_receipt("one")

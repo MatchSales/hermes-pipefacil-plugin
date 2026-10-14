@@ -1018,6 +1018,11 @@ class PipefacilAdapter(BasePlatformAdapter):
                         raise
                     await asyncio.sleep(0.5 * (2 ** attempt))
         except PipefacilAPIError as exc:
+            from .managed import current
+            if current() is not None:
+                # A generated answer is persisted by Hermes before CRM confirms delivery.
+                # Never recover a managed turn from that potentially unsent local transcript.
+                raise RuntimeError("Managed attendance requires confirmed CRM history") from exc
             history_source = "hermes"
             history = []
             has_more = False
@@ -1311,6 +1316,13 @@ humana. Depois do handoff, encerre o turno sem novas mensagens ou ações.
         publication = getattr(self, "_managed_publication", None)
         if publication:
             source.thread_id = "pf-revision-" + str(publication["revision"])
+        from .managed import current
+        execution = current()
+        if execution is not None:
+            # Retain previous transcripts for audit, but do not feed unconfirmed output
+            # from an older run into the next model turn. CRM history is canonical.
+            prefix = source.thread_id or "pf-external-v2"
+            source.thread_id = prefix + "-execution-" + execution["execution"]["executionId"]
         return source
 
     @staticmethod
