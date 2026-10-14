@@ -11,7 +11,7 @@ import pytest
 
 from test_gateway_sessions import _modules
 from test_hardening import module, signed
-from test_http_runtime import adapter, drain, listener, payload
+from test_http_runtime import adapter, drain, listener, payload, native_sessions
 from test_managed_execution import command
 
 
@@ -21,6 +21,7 @@ def external_adapter(home, monkeypatch):
     monkeypatch.setattr(_modules()[0], "fetch_conversation_history", module("api").fetch_conversation_history)
     value.crm.member_user_id = "external-bot"
     value.crm.fields = frozenset({"name", "notes"})
+    native_sessions(value)
     return value
 
 

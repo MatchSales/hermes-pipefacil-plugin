@@ -121,13 +121,13 @@ async def turn_scope(adapter, kwargs):
             CURRENT.reset(token)
 
 
-def context(*, api_key, base_url):
+def context(*, api_key, base_url, timeout=api.API_TIMEOUT_SECONDS):
     value = current()
     if value is None:
         raise api.PipefacilAPIError("No managed execution.")
     execution = value["execution"]
     data = api.request_json(api_key=api_key, base_url=base_url, method="GET",
-            path="/api/v1/ai-agent/executions/" + quote(execution["executionId"], safe=""))["data"]
+            path="/api/v1/ai-agent/executions/" + quote(execution["executionId"], safe=""), timeout=timeout)["data"]
     received = data.get("execution", {}) if isinstance(data, dict) else {}
     if any(received.get(k) != execution.get(k) for k in ("protocolVersion", "executionId", "agentId", "dealId",
                                                         "generation", "agentVersion", "channelId", "conversationId")):
@@ -154,11 +154,15 @@ def effect(*, api_key, base_url, method, suffix, payload=None):
             result = api.request_json(api_key=api_key, base_url=base_url, method=method,
                     path="/api/v1/ai-agent/executions/" + quote(execution["executionId"], safe="") + suffix,
                     payload=payload, idempotency_key=key)["data"]
-        except api.PipefacilAPIError:
+        except api.PipefacilAPIError as exc:
             # GET only after uncertainty. Even a 404 here is not permission to repeat the POST.
             result = receipt()
             if result is None:
+                if exc.definite_rejection or exc.status_code in {400, 401, 403, 404, 409, 410, 422, 429}:
+                    raise api.PipefacilAPIError("Effect rejected by CRM.", definite_rejection=True) from None
                 raise api.PipefacilAPIError("Effect outcome uncertain; do not repeat.") from None
+    if isinstance(result, dict) and result.get("status") == "NOT_APPLIED":
+        raise api.PipefacilAPIError("Effect was not applied.", definite_rejection=True)
     if not isinstance(result, dict) or result.get("status") != "APPLIED" or result.get("result") is None:
         raise api.PipefacilAPIError("Effect is reserved or uncertain; do not repeat.")
     return {"data": result["result"]}
