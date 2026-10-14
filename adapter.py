@@ -651,8 +651,10 @@ class PipefacilAdapter(BasePlatformAdapter):
                 return web.json_response({"error": "invalid_request_body"}, status=400)
             if isinstance(payload, dict) and any(k in payload for k in ("_pipefacil_managed", "_pipefacil_external_execution")):
                 return web.json_response({"error": "private_context_not_allowed"}, status=400)
-            if not isinstance(payload, dict) or payload.get("type") != "message.received":
+            if not isinstance(payload, dict) or payload.get("type") not in {"message.received", "attendance.resume"}:
                 return web.json_response({"status": "ignored", "reason": "unsupported event"}, status=200)
+            if payload.get("type") == "attendance.resume" and "execution" not in payload:
+                return web.json_response({"error": "resume_requires_execution_v2"}, status=422)
             control = getattr(self, "_admission_control", None)
             if control is not None and control.status()["closed"]:
                 return web.json_response({"error": "profile_admission_closed"}, status=503,
@@ -1117,6 +1119,20 @@ class PipefacilAdapter(BasePlatformAdapter):
             f"{history_guidance} Se precisar mudar dados do "
             "negócio, use a ferramenta de atualização do Pipefacil e só informe sucesso depois da confirmação."
         )
+        from .managed import current
+
+        if payload.get("type") == "attendance.resume" and current() is not None:
+            if history_source != "pipefacil":
+                raise RuntimeError("Resume requires current CRM conversation history")
+            prompt = (
+                "O operador autorizado do CRM solicitou retomar o atendimento agora. "
+                "Consulte o histórico atual abaixo e continue a conversa naturalmente, mesmo se a última "
+                "mensagem for da equipe. Não repita o que já foi respondido nem trate mensagens da equipe "
+                "como pedidos do contato. Não invente uma mensagem nova do cliente. "
+                "Siga o Prompt e as skills do agente e suas permissões atuais.\n\n"
+                f"Lead: {str(contact.get('name') or 'sem nome')[:200]}\n"
+                f"{history_context}\n{history_text}\n\n{history_guidance}"
+            )
         source = self._build_contact_source(
             chat_id=chat_id,
             contact=contact,
