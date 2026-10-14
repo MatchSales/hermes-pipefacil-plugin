@@ -50,7 +50,7 @@ def validate_payload(adapter, payload, *, max_age, allow_team_messages=False):
             or any(not _identifier(execution.get(k)) for k in ("executionId", "agentId", "dealId", "channelId", "conversationId"))
             or type(execution.get("generation")) is not int or type(execution.get("agentVersion")) is not int
             or execution["generation"] < 0 or execution["agentVersion"] < 0
-            or payload.get("type") != "message.received"):
+            or payload.get("type") not in {"message.received", "attendance.resume"}):
         raise ValueError("invalid_execution")
     data = payload.get("data", {})
     if not isinstance(data, dict):

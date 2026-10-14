@@ -24,11 +24,13 @@ def external_adapter(home, monkeypatch):
     return value
 
 
-@pytest.mark.parametrize("action", ["reply", "mixed", "update", "handoff", "lost_response", "pause", "reassign", "revoke", "expired"])
+@pytest.mark.parametrize("action", ["reply", "resume", "resume_history_unavailable", "mixed", "update", "handoff", "lost_response", "pause", "reassign", "revoke", "expired"])
 def test_external_webhook_v2_uses_history_original_channel_and_live_authorization(tmp_path, monkeypatch, action):
     value = external_adapter(tmp_path, monkeypatch)
     event_payload = command()["payload"]
     execution = event_payload["execution"]
+    if action in {"resume", "resume_history_unavailable"}:
+        event_payload["type"] = "attendance.resume"
     if action == "mixed":
         event_payload["data"]["messages"].append({"id": "team-message", "type": "text",
             "body": "Equipe no lote misto", "fromMe": True, "timestamp": int(time.time() * 1000)})
@@ -50,6 +52,8 @@ def test_external_webhook_v2_uses_history_original_channel_and_live_authorizatio
             return web.json_response({"error": action}, status=403 if action == "revoke" else 409)
         if request.method == "GET" and request.path.endswith("/messages"):
             history_reads.append(request.path)
+            if action == "resume_history_unavailable":
+                return web.json_response({"error": "unavailable"}, status=503)
             return web.json_response({"data": [dict(id="device-msg", direction="OUTBOUND", body="Resposta pelo celular", timestamp="2026-10-01T12:00:00Z")]})
         if request.method == "GET":
             return web.json_response({"data": {"execution": execution, "deal": dict(
@@ -82,6 +86,9 @@ def test_external_webhook_v2_uses_history_original_channel_and_live_authorizatio
             assert "Equipe: Resposta pelo celular" in event.text
             assert "Equipe no lote misto" not in event.text
             assert "mantém responsável e co-responsável" in event.channel_prompt
+            if action == "resume":
+                assert "O operador autorizado do CRM solicitou retomar" in event.text
+                assert "Mensagem(ns) nova(s) recebida(s) agora do lead" not in event.text
             if action == "handoff":
                 result = await module("handoff").execute(value, event.source.chat_id,
                     event._pipefacil_turn_context, "test-key", {}, lambda: True)
@@ -90,7 +97,7 @@ def test_external_webhook_v2_uses_history_original_channel_and_live_authorizatio
                 result = await asyncio.to_thread(value.crm.update, event._pipefacil_turn_context,
                     "test-key", {"notes": "Atualização externa"}, lambda: True)
                 assert result["updated"]
-            elif action not in {"reply", "mixed", "lost_response"}:
+            elif action not in {"reply", "resume", "mixed", "lost_response"}:
                 invalidated = True
             return "Resposta externa"
         value.set_message_handler(handler)
@@ -108,9 +115,9 @@ def test_external_webhook_v2_uses_history_original_channel_and_live_authorizatio
                 await asyncio.wait_for(drain(value), 5)
                 async with client.post(origin + value.webhook_path, data=raw, headers=signed(raw)) as response:
                     assert response.status == 200 and (await response.json())["status"] == "duplicate"
-                assert len(history_reads) == 1
-                assert len(writes) == (2 if action == "update" else 1 if action in {"reply", "mixed", "handoff", "lost_response"} else 0)
-                if action in {"pause", "reassign", "revoke", "expired"}:
+                assert len(history_reads) == (3 if action == "resume_history_unavailable" else 1)
+                assert len(writes) == (2 if action == "update" else 1 if action in {"reply", "resume", "mixed", "handoff", "lost_response"} else 0)
+                if action in {"pause", "reassign", "revoke", "expired", "resume_history_unavailable"}:
                     # A refused final send remains a failed private job, with no
                     # retry or fallback notice delivered to the customer.
                     assert value.state.status()["jobs"] == {"failed": 1}

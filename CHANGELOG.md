@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.8.2-dev
+
+- Aceita `attendance.resume` no contrato de execução v2, no ingresso privado gerenciado e no webhook HMAC externo.
+- A retomada usa o histórico atual do CRM e inclui mensagens humanas, sem inventar uma nova mensagem do contato.
+- Sem histórico acessível do CRM, a retomada falha antes de gerar ou enviar uma resposta.
+
 ## 0.8.1-dev
 
 - Accept HMAC-authenticated execution-v2 webhooks for external profiles without enabling profile management. Use the execution-scoped CRM API for history, replies, edits and terminal handoff; preserve protocol-v1 webhooks in legacy workspaces.
