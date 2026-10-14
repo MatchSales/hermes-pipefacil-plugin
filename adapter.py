@@ -1176,6 +1176,9 @@ class PipefacilAdapter(BasePlatformAdapter):
         event._pipefacil_done = asyncio.get_running_loop().create_future() if ingress is not None else None
         task = None
         session_key = self._event_session_key(event)
+        from . import turn_context
+        checkpoint = await asyncio.to_thread(turn_context.prepare, self, source, ingress[1]) if ingress else None
+        successful = False
         try:
             await self.handle_message(event)
             if ingress is not None:
@@ -1183,10 +1186,11 @@ class PipefacilAdapter(BasePlatformAdapter):
                     raise RuntimeError("Hermes rejected the event")
                 task = self._session_tasks.get(session_key)
                 if task is not None:
-                    await asyncio.shield(task)
+                    await turn_context.wait(self, event, task, session_key, ingress[1])
                 outcome = await event._pipefacil_done
                 if getattr(outcome, "value", outcome) != "success":
                     raise RuntimeError("Hermes turn failed")
+            successful = True
         except BaseException:
             event._pipefacil_turn_context["active"] = False
             if ingress is not None:
@@ -1201,6 +1205,9 @@ class PipefacilAdapter(BasePlatformAdapter):
                 except Exception:
                     self._ready_error = "hermes_cancellation_failed"
             raise
+        finally:
+            if checkpoint is not None:
+                await asyncio.to_thread(turn_context.finish, self, checkpoint, ingress[1], successful)
 
     async def on_processing_start(self, event: MessageEvent) -> None:
         """Bind facts when Hermes actually starts the background model turn."""
@@ -1319,10 +1326,14 @@ humana. Depois do handoff, encerre o turno sem novas mensagens ou ações.
         from .managed import current
         execution = current()
         if execution is not None:
-            # Retain previous transcripts for audit, but do not feed unconfirmed output
-            # from an older run into the next model turn. CRM history is canonical.
+            # One lane per conversation/assignment/revision, not per execution.
+            # New namespace avoids adopting older lanes without durable checkpoints.
             prefix = source.thread_id or "pf-external-v2"
-            source.thread_id = prefix + "-execution-" + execution["execution"]["executionId"]
+            identity = execution["execution"]
+            source.thread_id = prefix + "-context-v1-" + digest([identity["agentId"], identity["dealId"], identity["generation"]])[:24]
+            # Native transcript ownership is per execution. Original provider IDs
+            # and timestamps remain unchanged in the CRM envelope/history.
+            source.message_id = "pf-execution-" + identity["executionId"]
         return source
 
     @staticmethod

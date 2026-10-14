@@ -10,7 +10,7 @@ import pytest
 from aiohttp import web
 
 from test_gateway_sessions import _modules
-from test_http_runtime import adapter, drain, listener
+from test_http_runtime import adapter, drain, listener, native_sessions
 
 
 def modules():
@@ -41,6 +41,7 @@ def managed_adapter(tmp_path, monkeypatch):
     monkeypatch.setattr(_modules()[0], "check_lead", gate.check_lead)
     monkeypatch.setattr(_modules()[0], "fetch_conversation_history", api.fetch_conversation_history)
     value.crm.member_user_id = "bot-a"
+    native_sessions(value)
     return value
 
 
@@ -119,7 +120,7 @@ def test_two_whatsapps_same_deal_original_destinations_receipts_and_pause(tmp_pa
                 assert sent[0][1] == "whatsapp-a" and sent[1][1] == "whatsapp-b"
                 assert ended.index("one") < started.index("two") + 1
                 assert len(set(sessions)) == 3
-                assert all(revision.startswith("pf-revision-1-execution-") for _, revision in sessions)
+                assert all(revision.startswith("pf-revision-1-context-v1-") for _, revision in sessions)
                 assert all(report["state"] == "COMPLETED" for _, report in reports)
             assert len(reports) == 3
             prior = value.managed_execution_receipt("one")

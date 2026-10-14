@@ -75,6 +75,7 @@ def request_json(
     payload: dict[str, Any] | None = None,
     files: dict[str, Any] | None = None,
     idempotency_key: str | None = None,
+    timeout: float = API_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     if not api_key.strip():
         raise PipefacilAPIError("PIPEFACIL_API_KEY is not configured for this profile.")
@@ -88,7 +89,7 @@ def request_json(
     if idempotency_key:
         headers["Idempotency-Key"] = idempotency_key
     try:
-        with httpx.Client(timeout=API_TIMEOUT_SECONDS, follow_redirects=False, trust_env=False) as client:
+        with httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False) as client:
             with client.stream(method, url, headers=headers, json=payload, files=files) as response:
                 chunks, size = [], 0
                 for chunk in response.iter_bytes(64 * 1024):

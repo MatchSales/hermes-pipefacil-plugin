@@ -13,6 +13,17 @@ from test_hardening import module, signed
 from test_gateway_sessions import _modules
 
 
+def native_sessions(value):
+    """Real profile-local session persistence; model runners remain deterministic."""
+    from gateway.config import GatewayConfig
+    from gateway.session import SessionStore
+    with value._runtime_scope():
+        store = SessionStore(value.profile_home / "sessions", GatewayConfig())
+    value.gateway_runner = SimpleNamespace(session_store=store, _evict_cached_agent=lambda key: None,
+                                          _interrupt_running_turn=lambda *a, **k: None)
+    return store
+
+
 def adapter(home, monkeypatch, *, capacity=500, concurrency=4, timeout=30):
     from gateway.config import Platform, PlatformConfig
     from hermes_constants import set_hermes_home_override, reset_hermes_home_override

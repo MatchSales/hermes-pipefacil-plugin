@@ -68,6 +68,8 @@ class State:
             db.execute("CREATE TABLE IF NOT EXISTS external_executions(id TEXT PRIMARY KEY, "
                        "fingerprint TEXT NOT NULL, job INTEGER NOT NULL UNIQUE)")
             db.execute("CREATE TABLE IF NOT EXISTS uploads(key TEXT PRIMARY KEY, receipt TEXT NOT NULL, updated REAL NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS turn_checkpoints(scope TEXT PRIMARY KEY, job INTEGER NOT NULL, "
+                       "session_key TEXT NOT NULL, session_id TEXT NOT NULL, active_ids TEXT NOT NULL, input_id TEXT NOT NULL)")
 
     @contextmanager
     def db(self):
@@ -242,6 +244,25 @@ class State:
             db.execute("UPDATE jobs SET state=?,error=?,updated=? WHERE id=? AND state='processing'",
                        (status, error, time.time(), job))
 
+    def turn_checkpoint(self, scope):
+        with self.db() as db:
+            row = db.execute("SELECT * FROM turn_checkpoints WHERE scope=?", (scope,)).fetchone()
+            return dict(row) if row else None
+
+    def save_turn_checkpoint(self, scope, job, session_key, session_id, active_ids, input_id):
+        with self.db() as db:
+            db.execute("INSERT INTO turn_checkpoints VALUES (?,?,?,?,?,?)",
+                       (scope, job, session_key, session_id, canonical(active_ids), input_id))
+
+    def clear_turn_checkpoint(self, scope, job):
+        with self.db() as db:
+            db.execute("DELETE FROM turn_checkpoints WHERE scope=? AND job=?", (scope, job))
+
+    def has_uncertain_actions(self, job):
+        with self.db() as db:
+            return db.execute("SELECT 1 FROM actions WHERE job=? AND state IN ('pending','uncertain') LIMIT 1",
+                              (job,)).fetchone() is not None
+
     def claim_action(self, job, kind, arguments):
         key = digest([kind, arguments] if kind == "upload" else [job, kind, arguments])
         with self.db() as db:
@@ -298,7 +319,10 @@ class State:
         with self.db() as db:
             jobs = {r[0]: r[1] for r in db.execute("SELECT state,count(*) FROM jobs GROUP BY state")}
             actions = {r[0]: r[1] for r in db.execute("SELECT state,count(*) FROM actions GROUP BY state")}
-        return {"jobs": jobs, "actions": actions, "capacity": self.capacity, "per_chat_capacity": self.per_chat}
+            blocked = db.execute("SELECT count(*) FROM turn_checkpoints c LEFT JOIN jobs j ON j.id=c.job "
+                                 "WHERE j.id IS NULL OR j.state!='processing'").fetchone()[0]
+        return {"jobs": jobs, "actions": actions, "capacity": self.capacity, "per_chat_capacity": self.per_chat,
+                "pending_context_recoveries": blocked}
 
     def reconcile(self, key, outcome, result, evidence):
         if self.lease is None:
