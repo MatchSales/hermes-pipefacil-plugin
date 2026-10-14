@@ -10,7 +10,8 @@ from test_http_runtime import listener, drain
 
 @pytest.mark.parametrize("interrupt_generation", [False, True])
 @pytest.mark.parametrize("partial_delivery", [False, True])
-def test_discarded_answer_never_enters_next_execution_history(tmp_path, monkeypatch, interrupt_generation, partial_delivery):
+@pytest.mark.parametrize("metadata_first", [False, True])
+def test_discarded_answer_never_enters_next_execution_history(tmp_path, monkeypatch, interrupt_generation, partial_delivery, metadata_first):
     value = managed_adapter(tmp_path / "profile", monkeypatch)
     store = value.gateway_runner.session_store
     first, second = command("old"), command("new")
@@ -53,6 +54,8 @@ def test_discarded_answer_never_enters_next_execution_history(tmp_path, monkeypa
             session_dbs.append(store._db_for_key(entry.session_key))
             prior.append(store.load_transcript(entry.session_id))
             prompts.append(event.text)
+            if metadata_first and identifier == "old":
+                store.append_to_transcript(entry.session_id, {"role": "session_meta", "model": "synthetic", "tools": []})
             store.append_to_transcript(entry.session_id, {"role": "user", "content": event.text, "message_id": event.message_id})
             if identifier == "old":
                 if partial_delivery:

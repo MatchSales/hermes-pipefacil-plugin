@@ -57,19 +57,27 @@ def _recover(adapter, saved):
     added = active[len(before):]
     if added:
         rows = db.get_messages(sid, after_id=added[0] - 1)
-        if (not rows or rows[0].get("role") != "user"
+        # On an early model failure the gateway can persist session_meta before
+        # the first user row. Keep this non-conversational native bookkeeping.
+        leading_meta = []
+        while rows and rows[0].get("role") == "session_meta":
+            leading_meta.append(rows.pop(0)["id"])
+        restored = before + leading_meta
+        if rows and (rows[0].get("role") != "user"
                 or rows[0].get("platform_message_id") != saved["input_id"]
                 or any(row.get("role") == "user" and row.get("platform_message_id") not in {None, saved["input_id"]}
                        for row in rows)):
             raise RuntimeError("Session suffix does not belong to this execution")
         # Address the exact first row after the durable checkpoint, never /undo 1
         # against a potentially newer turn. Native rewind soft-deletes the suffix.
-        db.rewind_to_message(sid, added[0], expected_active_ids=active)
-        if db.get_active_message_ids(sid) != before:
+        if rows:
+            db.rewind_to_message(sid, rows[0]["id"], expected_active_ids=active)
+        if db.get_active_message_ids(sid) != restored:
             raise RuntimeError("Session recovery did not restore its checkpoint")
     with store._get_transcript_drain_lock():
         store._clear_dirty_transcript(sid)
     adapter.gateway_runner._evict_cached_agent(saved["session_key"])
+    store.update_session(saved["session_key"], last_prompt_tokens=0, touch_activity=False)
     adapter.state.clear_turn_checkpoint(saved["scope"], saved["job"])
 
 
