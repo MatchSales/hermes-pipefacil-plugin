@@ -104,3 +104,33 @@ test('no listing, arbitrary namespaces, public writes or secret disclosures', as
   assert.equal((await upload({...env, UPLOAD_TOKENS_JSON: ''})).status, 503);
   assert.equal((await worker.fetch(new Request('https://media.example/health'), env)).status, 200);
 });
+
+
+test('MP4 video retains native MIME, immutable URL and byte range playback', async () => {
+  const {env, objects} = environment();
+  const video = Buffer.from([0, 0, 0, 24, ...Buffer.from('ftypisom'), 0, 0, 0, 0, ...Buffer.from('isommp42')]);
+  const response = await upload(env, {body: video, mime: 'video/mp4', filename: 'presentation.mp4'});
+  assert.equal(response.status, 200);
+  const receipt = (await response.json()).data;
+  assert.equal(receipt.contentType, 'video/mp4');
+  assert.equal(objects.size, 1);
+  const playback = await worker.fetch(new Request(receipt.url, {headers: {Range: 'bytes=4-7'}}), env);
+  assert.equal(playback.status, 206);
+  assert.equal(playback.headers.get('Content-Type'), 'video/mp4');
+  assert.equal(await playback.text(), 'ftyp');
+  const again = (await (await upload(env, {body: video, mime: 'video/mp4', filename: 'presentation.mp4'})).json()).data;
+  assert.equal(again.url, receipt.url);
+});
+
+for (const [name, body] of [
+  ['HTML', Buffer.from('<html>fake video</html>')],
+  ['AVIF', Buffer.from([0, 0, 0, 24, ...Buffer.from('ftypavif'), 0, 0, 0, 0, ...Buffer.from('isommp42')])],
+  ['audio-only', Buffer.from([0, 0, 0, 24, ...Buffer.from('ftypM4A '), 0, 0, 0, 0, ...Buffer.from('isommp42')])],
+  ['invalid box', Buffer.from([0, 0, 0, 4, ...Buffer.from('ftypisom')])],
+]) {
+  test(`forged MP4 ${name} rejected before storage`, async () => {
+    const {env, objects} = environment();
+    assert.equal((await upload(env, {body, mime: 'video/mp4', filename: 'fake.mp4'})).status, 415);
+    assert.equal(objects.size, 0);
+  });
+}

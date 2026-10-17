@@ -24,6 +24,7 @@ def current_turn(value, identity):
 @pytest.mark.parametrize("kind,name,body,mime", [
     ("image", "photo.jpeg", b"\xff\xd8\xffpixels", "image/jpeg"),
     ("document", "catalog.pdf", b"%PDF-1.7\ncontents", "application/pdf"),
+    ("video", "video.mp4", b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isommp42", "video/mp4"),
 ])
 def test_every_profile_sends_stable_r2_url_and_reuses_it_across_turns(tmp_path, monkeypatch, profile, kind, name, body, mime):
     value = adapter(tmp_path / f"sdr-{profile}", monkeypatch)

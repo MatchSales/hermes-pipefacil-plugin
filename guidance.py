@@ -81,8 +81,8 @@ TOOL_DESCRIPTIONS = {
         "Images use native vision and audio uses native transcription; use their current-turn context."
     ),
     "pipefacil_send_messages": (
-        "Send approved images, documents or split text to the current lead. "
-        "Pipefacil enviar arquivos, imagens, fotos, documentos, PDF, catálogo e apresentação. "
+        "Send approved images, MP4 videos, documents or split text to the current lead. "
+        "Pipefacil enviar arquivos, imagens, fotos, vídeos MP4, documentos, PDF, catálogo e apresentação. "
         "Prefer fileId and type returned by pipefacil_list_media for local profile files. "
         "Remote media requires an exact approved HTTPS URL from this profile's SOUL.md library. "
         "No recipient/phone parameter. At most two preliminary messages total per turn, across all calls; "

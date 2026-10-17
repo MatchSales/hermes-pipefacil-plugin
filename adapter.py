@@ -440,7 +440,7 @@ class PipefacilAdapter(BasePlatformAdapter):
                     or not stored.storage_key or not stored.content_digest):
                 raise PipefacilAPIError("Audio requires a profile-bound extension upload receipt.")
             message["contentDigest"] = stored.content_digest
-        elif message.get("type") in {"image", "document"}:
+        elif message.get("type") in {"image", "document", "video"}:
             if not message.get("mediaLink") and not message.get("fileId"):
                 raise PipefacilAPIError("Media requires an approved library entry.")
             if message.get("caption"):
@@ -457,7 +457,7 @@ class PipefacilAdapter(BasePlatformAdapter):
                     asset_data = read_asset(self.profile_home, message["fileId"], message["type"])
                 except (OSError, ValueError):
                     raise PipefacilAPIError("The approved profile file is unavailable or invalid.", definite_rejection=True) from None
-            elif message.get("type") in {"image", "document"}:
+            elif message.get("type") in {"image", "document", "video"}:
                 try:
                     asset_data = read_remote_asset(self.profile_home, message["mediaLink"], message["type"],
                                                    message.get("filename"), message.get("mimeType"))

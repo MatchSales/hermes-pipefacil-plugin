@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
-
 
 DEFAULT_API_BASE_URL = "https://pipefacil-server.matchsales.com.br"
 API_TIMEOUT_SECONDS = 20.0
@@ -176,8 +177,8 @@ def send_message(
     channel_id: str | None = None,
     sender_phone_number_id: str | None = None,
 ) -> dict[str, Any]:
-    """Send a public API text, image, or document message to one trusted destination."""
-    if message_type not in {"text", "image", "document", "audio"}:
+    """Send a public API text or media message to one trusted destination."""
+    if message_type not in {"text", "image", "document", "audio", "video"}:
         raise PipefacilAPIError("Unsupported Pipefacil message type.")
     body: dict[str, Any] = {"to": recipient, "type": message_type}
     if message_type == "text":
@@ -275,6 +276,37 @@ def upload_media(*, api_key, base_url, filename, mime_type, body):
     if not isinstance(data, dict) or not isinstance(data.get("key"), str) or not data["key"]:
         raise PipefacilAPIError("Pipefacil returned an invalid upload receipt.")
     return data
+
+
+def attach_deal_file(*, api_key, base_url, field_slug, filename, mime_type, body):
+    """Private CRM file attachment, scoped to the active execution; never use public R2."""
+    from . import managed
+    if not managed.current() or not re.fullmatch(r"[a-z0-9_]{1,100}", field_slug):
+        raise PipefacilAPIError("An active execution and configured file field are required.")
+    if not isinstance(body, bytes) or not 0 < len(body) <= 16 * 1024 * 1024:
+        raise PipefacilAPIError("Private file exceeds the 16 MiB bound.")
+    if mime_type not in {"application/pdf", "image/jpeg", "image/png", "image/webp"}:
+        raise PipefacilAPIError("Unsupported private document format.")
+    from .media import _valid_file_prefix
+    if not _valid_file_prefix(body[:64], mime_type):
+        raise PipefacilAPIError("Invalid private document content.")
+    return managed.effect(api_key=api_key, base_url=base_url, method="POST",
+            suffix="/files/" + quote(field_slug, safe=""),
+            files={"file": (filename, body, mime_type)},
+            fingerprint={"filename": filename, "mimeType": mime_type, "sha256": hashlib.sha256(body).hexdigest()})["data"]
+
+
+def create_deal_note(*, api_key, base_url, content):
+    """Append an idempotent analytical note without replacing a human's deal notes."""
+    from . import managed
+    if not managed.current() or not isinstance(content, str) or not 1 <= len(content) <= 10000:
+        raise PipefacilAPIError("An active execution and bounded note are required.")
+    execution = managed.current()["execution"]
+    # Stable across turns: a crash after note acceptance must not append it again.
+    from .state import digest
+    key = digest(["analytical_note_v1", execution["agentId"], execution["dealId"], execution["channelId"], content])
+    return managed.effect(api_key=api_key, base_url=base_url, method="POST",
+            suffix="/notes", payload={"content": content}, operation_key=key)["data"]
 
 
 def media_url(*, api_key, base_url, storage_key):

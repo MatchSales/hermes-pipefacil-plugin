@@ -8,7 +8,7 @@ const xmlOffice = new Set([
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   'application/vnd.openxmlformats-officedocument.presentationml.presentation',
 ]);
-const allowed = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp',
+const allowed = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'video/mp4',
   'application/pdf', 'text/plain', 'text/csv', ...office, ...xmlOffice]);
 /** @param {ArrayBuffer} buffer */
 const hex = buffer => Array.from(new Uint8Array(buffer), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -26,6 +26,16 @@ function validPrefix(bytes, mime) {
   if (mime === 'image/png') return starts([137, 80, 78, 71, 13, 10, 26, 10]);
   if (mime === 'image/gif') return text.startsWith('GIF87a') || text.startsWith('GIF89a');
   if (mime === 'image/webp') return text.startsWith('RIFF') && text.substring(8, 12) === 'WEBP';
+  if (mime === 'video/mp4') {
+    if (bytes.length < 16 || text.substring(4, 8) !== 'ftyp') return false;
+    const size = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0);
+    if (size < 16 || size > Math.min(bytes.length, 64) || size % 4) return false;
+    const brands = [text.substring(8, 12)];
+    for (let i = 16; i < size; i += 4) brands.push(text.substring(i, i + 4));
+    const denied = new Set(['avif', 'avis', 'mif1', 'msf1', 'heic', 'heix', 'hevc', 'hevx', 'M4A ', 'M4B ', 'M4P ']);
+    const video = new Set(['isom', 'iso2', 'iso3', 'iso4', 'iso5', 'iso6', 'mp41', 'mp42', 'avc1', 'M4V ', 'MSNV']);
+    return brands.some(brand => video.has(brand)) && !brands.some(brand => denied.has(brand));
+  }
   if (mime === 'application/pdf') return text.startsWith('%PDF-');
   if (office.has(mime)) return starts([208, 207, 17, 224, 161, 177, 26, 225]);
   if (xmlOffice.has(mime)) return starts([80, 75, 3, 4]);

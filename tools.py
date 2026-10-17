@@ -303,8 +303,8 @@ def _prepare_outbound_message(item: Any, profile_home: Path) -> dict[str, Any]:
         if caption is not None or item.get("url") is not None or item.get("fileId") is not None:
             raise ValueError("Text messages accept only the text field.")
         return {"type": "text", "text": text}
-    if kind not in {"image", "document"}:
-        raise ValueError("Message type must be text, image, or document.")
+    if kind not in {"image", "document", "video"}:
+        raise ValueError("Message type must be text, image, document, or video.")
     if item.get("fileId") is not None:
         if item.get("url") is not None or item.get("text") is not None:
             raise ValueError("Media uses either fileId or an approved URL.")
@@ -314,7 +314,7 @@ def _prepare_outbound_message(item: Any, profile_home: Path) -> dict[str, Any]:
         return {"type": kind, "fileId": identity, **({"caption": caption} if caption else {})}
     url = item.get("url")
     if not isinstance(url, str):
-        raise ValueError("An image or document requires a URL listed in this profile's SOUL.md.")
+        raise ValueError("Media requires a URL listed in this profile's SOUL.md.")
     library_item = resolve_media_link(profile_home, kind=kind, url=url)
     if library_item is None:
         raise ValueError("That HTTPS URL and type are not listed in this profile's SOUL.md.")
@@ -487,7 +487,7 @@ def register_tools(ctx) -> None:
                         "items": {
                             "type": "object",
                             "properties": {
-                                "type": {"type": "string", "enum": ["text", "image", "document"]},
+                                "type": {"type": "string", "enum": ["text", "image", "document", "video"]},
                                 "text": {"type": "string", "maxLength": 4000},
                                 "url": {"type": "string", "maxLength": 4000},
                                 "fileId": {"type": "string", "maxLength": 32},

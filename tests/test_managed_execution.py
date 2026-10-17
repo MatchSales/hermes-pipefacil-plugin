@@ -247,7 +247,7 @@ def test_managed_handoff_only_pauses_and_preserves_effect_receipt(tmp_path, monk
         value.state.close()
 
 
-@pytest.mark.parametrize("kind", ["image", "document", "audio"])
+@pytest.mark.parametrize("kind", ["image", "document", "audio", "video"])
 def test_managed_media_uses_execution_endpoint_and_v2_body_without_destination(monkeypatch, kind):
     managed, _, api, _ = modules()
     token = managed.CURRENT.set({"execution": {"executionId": "media-exec"}})

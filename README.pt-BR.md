@@ -11,7 +11,7 @@ uma ferramenta restrita para atualizar o negócio no CRM.
 - Autentica webhooks `message.received` com HMAC-SHA256, inclusive quando o backend compacta o JSON com gzip; rejeita eventos antigos.
 - Busca mensagens recentes de todos os participantes da conversa, não apenas as enviadas pelo Hermes.
 - Envia a resposta final do agente ao lead pela API do Pipefacil.
-- Registra `pipefacil_send_messages`, que permite enviar até duas mensagens adicionais (texto, imagem ou documento) antes da resposta final automática do Hermes.
+- Registra `pipefacil_send_messages`, que permite enviar até duas mensagens adicionais (texto, imagem, vídeo MP4 ou documento) antes da resposta final automática do Hermes.
 - Baixa somente anexos atuais e usa visão, leitura de documentos e transcrição de áudio nativas do Hermes.
 - Oferece catálogo de imagens/documentos em `media/` no próprio profile, com armazenamento permanente de mídias no CRM antes do envio.
 - Persiste a fila e as tentativas de envio antes de confirmar a admissão; ordena toda a execução por conversa.

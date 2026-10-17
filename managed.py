@@ -1,11 +1,11 @@
 """Execution v2 for managed profiles. Transport identity is never a model argument."""
 
 import asyncio
-from contextlib import asynccontextmanager
-from contextvars import ContextVar
 import json
 import re
 import time
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from urllib.parse import quote
 from weakref import WeakValueDictionary
 
@@ -135,9 +135,9 @@ def context(*, api_key, base_url, timeout=api.API_TIMEOUT_SECONDS):
     return data
 
 
-def effect(*, api_key, base_url, method, suffix, payload=None):
+def effect(*, api_key, base_url, method, suffix, payload=None, files=None, fingerprint=None, operation_key=None):
     execution = current()["execution"]
-    key = digest([execution["executionId"], method, suffix, payload])
+    key = operation_key or digest([execution["executionId"], method, suffix, payload] + ([fingerprint] if fingerprint is not None else []))
     receipt_path = "/api/v1/ai-agent/receipts/" + key
 
     def receipt():
@@ -153,7 +153,7 @@ def effect(*, api_key, base_url, method, suffix, payload=None):
         try:
             result = api.request_json(api_key=api_key, base_url=base_url, method=method,
                     path="/api/v1/ai-agent/executions/" + quote(execution["executionId"], safe="") + suffix,
-                    payload=payload, idempotency_key=key)["data"]
+                    payload=payload, **({"files": files} if files is not None else {}), idempotency_key=key)["data"]
         except api.PipefacilAPIError as exc:
             # GET only after uncertainty. Even a 404 here is not permission to repeat the POST.
             result = receipt()

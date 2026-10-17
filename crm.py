@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 
 from . import api, managed
-from .state import canonical, StateError
+from .state import StateError, canonical
 
 
 class CRM:
@@ -114,7 +114,16 @@ class CRM:
                 raise ValueError("A lost stage requires lostReason.")
 
         def write():
-            api.update_deal(api_key=key, base_url=self.adapter.api_base_url, seq=lead["seq"], properties=properties)
+            result = api.update_deal(api_key=key, base_url=self.adapter.api_base_url, seq=lead["seq"], properties=properties)
+            applied = result.get("data", {}) if isinstance(result, dict) else {}
+            if managed.current() and isinstance(applied, dict) and {"id", "seq", "contactId"} <= applied.keys():
+                # APPLIED is the server's atomic mutation receipt. A terminal stage
+                # may close execution access immediately; a subsequent GET is not
+                # needed to prove a transaction the server already confirmed.
+                if (applied.get("id") != lead.get("id") or applied.get("seq") != lead["seq"]
+                        or applied.get("contactId") != lead["contact"]["id"]):
+                    raise api.PipefacilAPIError("Managed deal receipt does not match the current lead.")
+                return {"success": True, "updated": True, "seq": lead["seq"], "updated_fields": sorted(properties)}
             try:
                 after = self.authorized(context, key, writing=True)
                 self.verify_properties(after, key, properties)
