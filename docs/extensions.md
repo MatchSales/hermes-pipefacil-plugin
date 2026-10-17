@@ -30,6 +30,19 @@ and six common tools are retained.
 
 ## Discovery and API
 
+In 0.8.4, `api.create_deal_note(api_key, base_url, content)` appends a bounded
+note with a stable per-agent/deal/channel/content receipt across turns, using the
+existing execution `/notes` endpoint. No new CRM endpoint is required.
+
+For managed execution APIs that omit `pipelines`, an operator may configure
+`platforms.pipefacil.extra.pipeline_catalog` with verified pipeline IDs and
+`stages` entries (`id`, `name`, `isLost`, `isWon`). It is intersected with
+`stage_ids` and the current deal's pipeline. An explicitly empty server catalog
+stays empty; authorization failures never fall back. Legacy external profiles
+continue fetching their live catalog. The CRM still validates every mutation.
+Personal bills are not uploaded to commercial R2. A private extension can retain
+its own verified, isolated copy without claiming that a CRM file field was updated.
+
 An extension registers a synchronous native `gateway_platform_event` hook.
 For `event_type=pipefacil.extension.describe.v1`, it returns a descriptor only
 when `profile_home` equals the resolved home captured at registration:
@@ -118,3 +131,13 @@ Pass its opaque result as `_stored_audio` with `type=audio` to
 `adapter.send_api_message`. The shared plugin checks profile/turn binding,
 renews the storage URL, revalidates CRM access, and journals delivery. Provider
 credentials, voice IDs and generation code stay in the business plugin.
+
+
+## Approved video delivery (0.8.3-dev)
+
+MP4 commercial videos use the same `adapter.send_api_message` path, with
+`type: video` and a catalog `fileId` or exact approved SOUL URL. The model cannot
+choose a destination, upload namespace or credential. Install the media Worker
+update first; older Workers reject video before the CRM message POST. The maximum
+is still 16 MiB. Prepare compatible MP4 codecs outside the agent; no runtime
+transcoding, arbitrary file execution or inbound-video analysis is enabled.

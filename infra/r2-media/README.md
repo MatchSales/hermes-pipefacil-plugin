@@ -5,7 +5,7 @@ This gateway belongs to the Hermes plugin repository. It uses the existing CRM
 then give each SDR a separate upload credential. The bucket stays private.
 
 POST `/upload` accepts a binary commercial asset (maximum 16 MiB), a bearer token,
-its MIME and a percent-encoded `X-Media-Filename`. The token's SHA-256 hash maps to
+its image/document/MP4 MIME and a percent-encoded `X-Media-Filename`. The token's SHA-256 hash maps to
 an operator-assigned profile namespace in the Worker secret `UPLOAD_TOKENS_JSON`.
 The client cannot choose a namespace. Bytes/signatures, MIME and filename are
 validated before storage; redirects, object listing and anonymous writes are absent.
@@ -66,3 +66,14 @@ fetch its receipt URL, repeat the upload and check the same URL is returned. Tes
 HEAD/ranges and an invalid token. This verification does not send a CRM/WhatsApp
 message. Remove only the synthetic smoke object's exact key afterward using
 `wrangler r2 object delete hermes-sdr-media/<key> --remote`.
+
+
+## MP4 videos
+
+The 0.8.3 plugin release adds approved `video/mp4` assets without changing the
+upload contract or 16 MiB bound. The Worker rejects malformed MP4 headers and
+image/audio-only container brands, and serves accepted videos as `video/mp4`,
+with Range support. Container validation is not codec verification: prepare
+compatible videos before placing them in a profile. Apply the additive Worker
+update before enabling MP4 sends; other profiles and historical URLs retain the
+same behavior and credentials.

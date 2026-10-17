@@ -8,7 +8,6 @@ from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 
-
 DEFAULT_API_BASE_URL = "https://pipefacil-server.matchsales.com.br"
 API_TIMEOUT_SECONDS = 20.0
 
@@ -176,8 +175,8 @@ def send_message(
     channel_id: str | None = None,
     sender_phone_number_id: str | None = None,
 ) -> dict[str, Any]:
-    """Send a public API text, image, or document message to one trusted destination."""
-    if message_type not in {"text", "image", "document", "audio"}:
+    """Send a public API text or media message to one trusted destination."""
+    if message_type not in {"text", "image", "document", "audio", "video"}:
         raise PipefacilAPIError("Unsupported Pipefacil message type.")
     body: dict[str, Any] = {"to": recipient, "type": message_type}
     if message_type == "text":
@@ -259,10 +258,16 @@ def get_contact(*, api_key, base_url, contact_id):
     return data
 
 
-def get_pipelines(*, api_key, base_url):
+def get_pipelines(*, api_key, base_url, operator_catalog=()):
     from . import managed
     if managed.current():
-        return managed.context(api_key=api_key, base_url=base_url).get("pipelines", [])
+        context = managed.context(api_key=api_key, base_url=base_url)
+        # Older execution APIs do not expose a pipeline catalog. Only an explicit,
+        # operator-verified profile catalog may supply it; failures still propagate.
+        data = context["pipelines"] if "pipelines" in context else list(operator_catalog)
+        if not isinstance(data, list) or not all(isinstance(p, dict) for p in data):
+            raise PipefacilAPIError("Pipefacil returned invalid pipelines.")
+        return data
     data = request_json(api_key=api_key, base_url=base_url, method="GET", path="/api/v1/pipelines")["data"]
     if not isinstance(data, list) or not all(isinstance(p, dict) for p in data):
         raise PipefacilAPIError("Pipefacil returned invalid pipelines.")
@@ -275,6 +280,19 @@ def upload_media(*, api_key, base_url, filename, mime_type, body):
     if not isinstance(data, dict) or not isinstance(data.get("key"), str) or not data["key"]:
         raise PipefacilAPIError("Pipefacil returned an invalid upload receipt.")
     return data
+
+
+def create_deal_note(*, api_key, base_url, content):
+    """Append an idempotent analytical note without replacing a human's deal notes."""
+    from . import managed
+    if not managed.current() or not isinstance(content, str) or not 1 <= len(content) <= 10000:
+        raise PipefacilAPIError("An active execution and bounded note are required.")
+    execution = managed.current()["execution"]
+    # Stable across turns: a crash after note acceptance must not append it again.
+    from .state import digest
+    key = digest(["analytical_note_v1", execution["agentId"], execution["dealId"], execution["channelId"], content])
+    return managed.effect(api_key=api_key, base_url=base_url, method="POST",
+            suffix="/notes", payload={"content": content}, operation_key=key)["data"]
 
 
 def media_url(*, api_key, base_url, storage_key):

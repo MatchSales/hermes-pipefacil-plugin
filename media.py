@@ -35,7 +35,7 @@ def normalize_mime(value):
 
 _MEDIA_LIBRARY_LINE = re.compile(
     r"^\s*-\s*label:\s*(?P<label>[^|]+?)\s*\|\s*type:\s*"
-    r"(?P<kind>image|document)\s*\|\s*url:\s*(?P<url>\S+)\s*$",
+    r"(?P<kind>image|document|video)\s*\|\s*url:\s*(?P<url>\S+)\s*$",
     re.IGNORECASE,
 )
 _DOCUMENT_MIMES = {
@@ -225,6 +225,17 @@ def _valid_file_prefix(content: bytes, mime_type: str) -> bool:
         if mime_type == "audio/webm":
             return content.startswith(b"\x1a\x45\xdf\xa3")
         return content.startswith(b"ID3") or (len(content) > 2 and content[0] == 255 and content[1] & 224 == 224)
+    if mime_type == "video/mp4":
+        # MP4 container brands only; filenames and a forged Content-Type are insufficient.
+        if len(content) < 16 or content[4:8] != b"ftyp":
+            return False
+        size = int.from_bytes(content[:4], "big")
+        if not 16 <= size <= len(content) or size % 4:
+            return False
+        brands = {content[8:12]} | {content[i:i + 4] for i in range(16, size, 4)}
+        denied = {b"avif", b"avis", b"mif1", b"msf1", b"heic", b"heix", b"hevc", b"hevx", b"M4A ", b"M4B ", b"M4P "}
+        allowed = {b"isom", b"iso2", b"iso3", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42", b"avc1", b"M4V ", b"MSNV"}
+        return bool(brands & allowed) and not bool(brands & denied)
     if mime_type == "application/pdf":
         return content.startswith(b"%PDF-")
     if mime_type.startswith("image/"):

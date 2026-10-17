@@ -262,6 +262,7 @@ class PipefacilAdapter(BasePlatformAdapter):
         self.crm = CRM(self, member_user_id=get_scoped_secret("PIPEFACIL_MEMBER_USER_ID", "") or extra.get("member_user_id", ""),
                        fields=fields, custom_fields=_list_setting(extra, "custom_fields", "PIPEFACIL_CUSTOM_FIELDS"),
                        stages=_list_setting(extra, "stage_ids", "PIPEFACIL_STAGE_IDS"),
+                       pipeline_catalog=extra.get("pipeline_catalog"),
                        handoff_user_id=get_scoped_secret("PIPEFACIL_HANDOFF_USER_ID", "") or extra.get("handoff_user_id", ""))
         with _ADAPTERS_LOCK:
             _ADAPTERS_BY_PROFILE[str(self.profile_home)] = self
@@ -440,7 +441,7 @@ class PipefacilAdapter(BasePlatformAdapter):
                     or not stored.storage_key or not stored.content_digest):
                 raise PipefacilAPIError("Audio requires a profile-bound extension upload receipt.")
             message["contentDigest"] = stored.content_digest
-        elif message.get("type") in {"image", "document"}:
+        elif message.get("type") in {"image", "document", "video"}:
             if not message.get("mediaLink") and not message.get("fileId"):
                 raise PipefacilAPIError("Media requires an approved library entry.")
             if message.get("caption"):
@@ -457,7 +458,7 @@ class PipefacilAdapter(BasePlatformAdapter):
                     asset_data = read_asset(self.profile_home, message["fileId"], message["type"])
                 except (OSError, ValueError):
                     raise PipefacilAPIError("The approved profile file is unavailable or invalid.", definite_rejection=True) from None
-            elif message.get("type") in {"image", "document"}:
+            elif message.get("type") in {"image", "document", "video"}:
                 try:
                     asset_data = read_remote_asset(self.profile_home, message["mediaLink"], message["type"],
                                                    message.get("filename"), message.get("mimeType"))

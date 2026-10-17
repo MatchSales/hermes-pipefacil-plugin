@@ -15,11 +15,15 @@ from .media import _valid_file_prefix, normalize_mime, resolve_media_link
 from .network import PublicTransport
 
 MAX_BYTES = 16 * 1024 * 1024  # Shared commercial media upload limit.
-MIMES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf",
+MIMES = frozenset({"image/jpeg", "image/png", "image/gif", "image/webp", "video/mp4", "application/pdf",
                   "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                   "application/vnd.ms-excel", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                   "application/vnd.ms-powerpoint", "application/vnd.openxmlformats-officedocument.presentationml.presentation",
                   "text/csv", "text/plain"})
+
+
+def asset_kind(mime):
+    return "image" if mime.startswith("image/") else "video" if mime == "video/mp4" else "document"
 
 
 @dataclass(frozen=True)
@@ -29,7 +33,7 @@ class RemoteUpload:
 
 
 def read_remote_asset(home, url, kind, filename=None, mime=None):
-    """Copy only this profile's approved HTTPS image/document, with pinned public DNS."""
+    """Copy only this profile's approved HTTPS image/document/video, with pinned public DNS."""
     if resolve_media_link(home, kind=kind, url=url) is None:
         raise ValueError("media_not_in_profile")
     with httpx.Client(timeout=25.0, follow_redirects=False, trust_env=False, transport=PublicTransport()) as client:
@@ -42,7 +46,7 @@ def read_remote_asset(home, url, kind, filename=None, mime=None):
             actual_mime = normalize_mime(response.headers.get("Content-Type"))
             if actual_mime in {"", "application/octet-stream", "binary/octet-stream"}:
                 actual_mime = normalize_mime(mime)
-            if actual_mime not in MIMES or ("image" if actual_mime.startswith("image/") else "document") != kind:
+            if actual_mime not in MIMES or asset_kind(actual_mime) != kind:
                 raise ValueError("invalid_media_type")
             chunks, size = [], 0
             for chunk in response.iter_bytes(64 * 1024):
@@ -99,7 +103,7 @@ def catalog(home):
             relative = path.relative_to(root).as_posix()
             identity = hashlib.sha256((str(home) + ":" + relative).encode()).hexdigest()[:32]
             result.append(Asset(identity, str(Path(relative).with_suffix("")), filename,
-                                "image" if mime.startswith("image/") else "document", mime, info.st_size, path))
+                                asset_kind(mime), mime, info.st_size, path))
             if len(result) == 200:
                 return result
     return result

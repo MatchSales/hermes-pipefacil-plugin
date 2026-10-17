@@ -11,7 +11,7 @@ sends the final answer through the Pipefacil API, and provides a narrowly scoped
 - Verifies Pipefacil AI-agent HMAC-SHA256 signatures, including gzip payloads; rejects historical replays.
 - Loads recent conversation messages from every participant, not only messages sent by Hermes.
 - Replies to the lead through the Pipefacil API.
-- Registers `pipefacil_send_messages` to send up to two additional text, image, or document messages before Hermes sends its final answer automatically.
+- Registers `pipefacil_send_messages` to send up to two additional text, image, MP4 video, or document messages before Hermes sends its final answer automatically.
 - Downloads current images/documents/audio and uses Hermes' native vision, document readers and transcription.
 - Lists approved profile-local `media/` assets and stores images/documents as permanent R2 objects before sending.
 - Durably queues admitted jobs, orders preparation/model execution per conversation and journals HTTP effects before attempting them.

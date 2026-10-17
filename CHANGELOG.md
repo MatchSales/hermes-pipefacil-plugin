@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.8.3-dev
+
+- Execution-scoped private CRM file attachments and analytical notes, with durable
+  receipts and cross-turn note deduplication. Confirm terminal managed updates from
+  the atomic CRM receipt while retaining legacy external readback compatibility.
+
+- Add native approved MP4 video delivery to the existing profile catalog, tools, durable R2 upload and CRM send contract.
+- Preserve the 16 MiB bound, profile isolation, exact remote URL allowlist, stable upload receipts, live execution authorization and uncertain-send protection for videos.
+- Validate MP4 container brands in both the plugin and media Worker; other MIME types, image/audio-only brands and malformed prefixes are rejected. Operators must prepare compatible codecs before adding commercial assets.
+- Deploy the backward-compatible media Worker before enabling video delivery in profiles. No inbound-video analysis or generated video is enabled.
+
 ## 0.8.2-dev
 
 - Aceita `attendance.resume` no contrato de execução v2, no ingresso privado gerenciado e no webhook HMAC externo.

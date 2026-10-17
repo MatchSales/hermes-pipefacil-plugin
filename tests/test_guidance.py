@@ -98,7 +98,7 @@ def test_health_reports_shared_revision_and_contract_even_when_state_unavailable
     response = asyncio.run(adapter._handle_health(None))
     body = json.loads(response.text)
     assert response.status == (503 if state_unavailable else 200)
-    assert body["pluginVersion"] == "0.8.2-dev" and body["guidanceRevision"] == shared.SHARED_GUIDANCE_REVISION
+    assert body["pluginVersion"] == sys.modules["pipefacil_plugin_test"].__version__ and body["guidanceRevision"] == shared.SHARED_GUIDANCE_REVISION
     assert body["mediaPersistenceRevision"] == 2
     assert body["leadAdmissionRevision"] == "internal-contact-v2"
     assert body["webhookExecutionProtocols"] == [1, 2]
