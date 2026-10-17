@@ -262,6 +262,7 @@ class PipefacilAdapter(BasePlatformAdapter):
         self.crm = CRM(self, member_user_id=get_scoped_secret("PIPEFACIL_MEMBER_USER_ID", "") or extra.get("member_user_id", ""),
                        fields=fields, custom_fields=_list_setting(extra, "custom_fields", "PIPEFACIL_CUSTOM_FIELDS"),
                        stages=_list_setting(extra, "stage_ids", "PIPEFACIL_STAGE_IDS"),
+                       pipeline_catalog=extra.get("pipeline_catalog"),
                        handoff_user_id=get_scoped_secret("PIPEFACIL_HANDOFF_USER_ID", "") or extra.get("handoff_user_id", ""))
         with _ADAPTERS_LOCK:
             _ADAPTERS_BY_PROFILE[str(self.profile_home)] = self

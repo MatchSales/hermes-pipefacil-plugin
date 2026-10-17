@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import re
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
 
@@ -260,10 +258,16 @@ def get_contact(*, api_key, base_url, contact_id):
     return data
 
 
-def get_pipelines(*, api_key, base_url):
+def get_pipelines(*, api_key, base_url, operator_catalog=()):
     from . import managed
     if managed.current():
-        return managed.context(api_key=api_key, base_url=base_url).get("pipelines", [])
+        context = managed.context(api_key=api_key, base_url=base_url)
+        # Older execution APIs do not expose a pipeline catalog. Only an explicit,
+        # operator-verified profile catalog may supply it; failures still propagate.
+        data = context["pipelines"] if "pipelines" in context else list(operator_catalog)
+        if not isinstance(data, list) or not all(isinstance(p, dict) for p in data):
+            raise PipefacilAPIError("Pipefacil returned invalid pipelines.")
+        return data
     data = request_json(api_key=api_key, base_url=base_url, method="GET", path="/api/v1/pipelines")["data"]
     if not isinstance(data, list) or not all(isinstance(p, dict) for p in data):
         raise PipefacilAPIError("Pipefacil returned invalid pipelines.")
@@ -276,24 +280,6 @@ def upload_media(*, api_key, base_url, filename, mime_type, body):
     if not isinstance(data, dict) or not isinstance(data.get("key"), str) or not data["key"]:
         raise PipefacilAPIError("Pipefacil returned an invalid upload receipt.")
     return data
-
-
-def attach_deal_file(*, api_key, base_url, field_slug, filename, mime_type, body):
-    """Private CRM file attachment, scoped to the active execution; never use public R2."""
-    from . import managed
-    if not managed.current() or not re.fullmatch(r"[a-z0-9_]{1,100}", field_slug):
-        raise PipefacilAPIError("An active execution and configured file field are required.")
-    if not isinstance(body, bytes) or not 0 < len(body) <= 16 * 1024 * 1024:
-        raise PipefacilAPIError("Private file exceeds the 16 MiB bound.")
-    if mime_type not in {"application/pdf", "image/jpeg", "image/png", "image/webp"}:
-        raise PipefacilAPIError("Unsupported private document format.")
-    from .media import _valid_file_prefix
-    if not _valid_file_prefix(body[:64], mime_type):
-        raise PipefacilAPIError("Invalid private document content.")
-    return managed.effect(api_key=api_key, base_url=base_url, method="POST",
-            suffix="/files/" + quote(field_slug, safe=""),
-            files={"file": (filename, body, mime_type)},
-            fingerprint={"filename": filename, "mimeType": mime_type, "sha256": hashlib.sha256(body).hexdigest()})["data"]
 
 
 def create_deal_note(*, api_key, base_url, content):

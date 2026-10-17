@@ -9,12 +9,36 @@ from .state import StateError, canonical
 
 
 class CRM:
-    def __init__(self, adapter, *, member_user_id, fields, custom_fields, stages, handoff_user_id=""):
+    def __init__(self, adapter, *, member_user_id, fields, custom_fields, stages, handoff_user_id="", pipeline_catalog=None):
         self.adapter = adapter
         self.member_user_id = member_user_id
         self.fields = frozenset(fields)
         self.custom_fields = frozenset(custom_fields)
         self.stages = frozenset(stages)
+        catalog = pipeline_catalog if pipeline_catalog is not None else []
+        if not isinstance(catalog, list) or len(catalog) > 20:
+            raise ValueError("Invalid operator pipeline catalog")
+        self.pipeline_catalog = []
+        for pipeline in catalog:
+            if (not isinstance(pipeline, dict) or not isinstance(pipeline.get("id"), str)
+                    or not 1 <= len(pipeline["id"]) <= 100
+                    or not isinstance(pipeline.get("stages"), list) or len(pipeline["stages"]) > 200
+                    or type(pipeline.get("isArchived", False)) is not bool):
+                raise ValueError("Invalid operator pipeline catalog")
+            seen = set()
+            rows = []
+            for stage in pipeline["stages"]:
+                if (not isinstance(stage, dict) or not isinstance(stage.get("id"), str)
+                        or not 1 <= len(stage["id"]) <= 100 or stage["id"] in seen
+                        or type(stage.get("isLost", False)) is not bool
+                        or type(stage.get("isWon", False)) is not bool):
+                    raise ValueError("Invalid operator stage catalog")
+                seen.add(stage["id"])
+                rows.append({"id": stage["id"], "name": str(stage.get("name", ""))[:255],
+                             "isLost": stage.get("isLost", False), "isWon": stage.get("isWon", False)})
+            if any(p["id"] == pipeline["id"] for p in self.pipeline_catalog):
+                raise ValueError("Duplicate operator pipeline")
+            self.pipeline_catalog.append({"id": pipeline["id"], "isArchived": pipeline.get("isArchived", False), "stages": rows})
         if not isinstance(handoff_user_id, str) or len(handoff_user_id) > 100 or "\x00" in handoff_user_id:
             raise ValueError("Invalid Pipefacil handoff_user_id")
         self.handoff_user_id = handoff_user_id.strip()
@@ -49,7 +73,7 @@ class CRM:
         return lead
 
     def allowed_stages(self, lead, key):
-        pipelines = api.get_pipelines(api_key=key, base_url=self.adapter.api_base_url)
+        pipelines = api.get_pipelines(api_key=key, base_url=self.adapter.api_base_url, operator_catalog=self.pipeline_catalog)
         return [{"id": s["id"], "name": s.get("name"), "isLost": bool(s.get("isLost")), "isWon": bool(s.get("isWon"))}
                 for p in pipelines if p.get("id") == lead.get("pipelineId") and not p.get("isArchived")
                 for s in p.get("stages", []) if isinstance(s, dict) and s.get("id") in self.stages][:200]

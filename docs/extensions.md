@@ -30,15 +30,18 @@ and six common tools are retained.
 
 ## Discovery and API
 
-In 0.8.3, `api.attach_deal_file(api_key, base_url, field_slug, filename, mime_type,
-body)` (keyword arguments) binds a bounded PDF/image to a configured file field
-using the active execution's private CRM endpoint. It never uses the commercial
-R2 gateway. `api.create_deal_note(api_key, base_url, content)` appends a bounded
-note with a stable per-agent/deal/channel/content receipt across turns. Both
-require execution v2; no general workspace key or model-chosen destination is
-accepted. The CRM must deploy the execution file route before enabling a private
-extension that uses it. After ambiguous upload failures, inspect the receipt;
-never replay an uncertain upload blindly.
+In 0.8.4, `api.create_deal_note(api_key, base_url, content)` appends a bounded
+note with a stable per-agent/deal/channel/content receipt across turns, using the
+existing execution `/notes` endpoint. No new CRM endpoint is required.
+
+For managed execution APIs that omit `pipelines`, an operator may configure
+`platforms.pipefacil.extra.pipeline_catalog` with verified pipeline IDs and
+`stages` entries (`id`, `name`, `isLost`, `isWon`). It is intersected with
+`stage_ids` and the current deal's pipeline. An explicitly empty server catalog
+stays empty; authorization failures never fall back. Legacy external profiles
+continue fetching their live catalog. The CRM still validates every mutation.
+Personal bills are not uploaded to commercial R2. A private extension can retain
+its own verified, isolated copy without claiming that a CRM file field was updated.
 
 An extension registers a synchronous native `gateway_platform_event` hook.
 For `event_type=pipefacil.extension.describe.v1`, it returns a descriptor only
